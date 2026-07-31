@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./apps/cli" },
+    { "path": "./packages/bridge-core" },
+    { "path": "./packages/gateway" },
+    { "path": "./packages/overlay" },
+    { "path": "./packages/protocol" }
+  ]
+}

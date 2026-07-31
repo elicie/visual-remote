@@ -1,0 +1,245 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-31T04:03:05Z",
+  "title": "Design System: Visual Remote Dev Bridge",
+  "extensions": {
+    "colorMeta": {
+      "graphite": {
+        "role": "neutral",
+        "displayName": "Matte Graphite",
+        "canonical": "#20211f",
+        "tonalRamp": ["oklch(15% 0.008 105)", "oklch(27% 0.008 105)", "oklch(39% 0.008 105)", "oklch(51% 0.008 105)", "oklch(63% 0.008 105)", "oklch(75% 0.008 105)", "oklch(87% 0.008 105)", "oklch(95% 0.008 105)"]
+      },
+      "graphite-raised": {
+        "role": "neutral",
+        "displayName": "Raised Graphite",
+        "canonical": "#30312e",
+        "tonalRamp": ["oklch(15% 0.009 105)", "oklch(27% 0.009 105)", "oklch(39% 0.009 105)", "oklch(51% 0.009 105)", "oklch(63% 0.009 105)", "oklch(75% 0.009 105)", "oklch(87% 0.009 105)", "oklch(95% 0.009 105)"]
+      },
+      "strip": {
+        "role": "neutral",
+        "displayName": "Warm Strip",
+        "canonical": "#f4efe3",
+        "tonalRamp": ["oklch(15% 0.025 82)", "oklch(27% 0.025 82)", "oklch(39% 0.025 82)", "oklch(51% 0.025 82)", "oklch(63% 0.025 82)", "oklch(75% 0.025 82)", "oklch(87% 0.025 82)", "oklch(95% 0.025 82)"]
+      },
+      "strip-strong": {
+        "role": "neutral",
+        "displayName": "Strong Strip White",
+        "canonical": "#fffaf0",
+        "tonalRamp": ["oklch(15% 0.022 82)", "oklch(27% 0.022 82)", "oklch(39% 0.022 82)", "oklch(51% 0.022 82)", "oklch(63% 0.022 82)", "oklch(75% 0.022 82)", "oklch(87% 0.022 82)", "oklch(95% 0.022 82)"]
+      },
+      "pure-white": {
+        "role": "neutral",
+        "displayName": "Pure White",
+        "canonical": "#ffffff",
+        "tonalRamp": ["oklch(15% 0 0)", "oklch(27% 0 0)", "oklch(39% 0 0)", "oklch(51% 0 0)", "oklch(63% 0 0)", "oklch(75% 0 0)", "oklch(87% 0 0)", "oklch(95% 0 0)"]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Instrument Ink",
+        "canonical": "#1b1c1a",
+        "tonalRamp": ["oklch(15% 0.007 105)", "oklch(27% 0.007 105)", "oklch(39% 0.007 105)", "oklch(51% 0.007 105)", "oklch(63% 0.007 105)", "oklch(75% 0.007 105)", "oklch(87% 0.007 105)", "oklch(95% 0.007 105)"]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted Ledger Gray",
+        "canonical": "#64635b",
+        "tonalRamp": ["oklch(15% 0.014 95)", "oklch(27% 0.014 95)", "oklch(39% 0.014 95)", "oklch(51% 0.014 95)", "oklch(63% 0.014 95)", "oklch(75% 0.014 95)", "oklch(87% 0.014 95)", "oklch(95% 0.014 95)"]
+      },
+      "rule": {
+        "role": "neutral",
+        "displayName": "Strip Rule",
+        "canonical": "#b7b0a1",
+        "tonalRamp": ["oklch(15% 0.025 82)", "oklch(27% 0.025 82)", "oklch(39% 0.025 82)", "oklch(51% 0.025 82)", "oklch(63% 0.025 82)", "oklch(75% 0.025 82)", "oklch(87% 0.025 82)", "oklch(95% 0.025 82)"]
+      },
+      "dispatch": {
+        "role": "primary",
+        "displayName": "Dispatch Orange",
+        "canonical": "#cf450f",
+        "tonalRamp": ["oklch(15% 0.19 42)", "oklch(27% 0.19 42)", "oklch(39% 0.19 42)", "oklch(51% 0.19 42)", "oklch(63% 0.19 42)", "oklch(75% 0.19 42)", "oklch(87% 0.19 42)", "oklch(95% 0.19 42)"]
+      },
+      "dispatch-dark": {
+        "role": "primary",
+        "displayName": "Dispatch Dark",
+        "canonical": "#9f3108",
+        "tonalRamp": ["oklch(15% 0.16 41)", "oklch(27% 0.16 41)", "oklch(39% 0.16 41)", "oklch(51% 0.16 41)", "oklch(63% 0.16 41)", "oklch(75% 0.16 41)", "oklch(87% 0.16 41)", "oklch(95% 0.16 41)"]
+      },
+      "verified": {
+        "role": "secondary",
+        "displayName": "Verification Cyan",
+        "canonical": "#087f8c",
+        "tonalRamp": ["oklch(15% 0.10 203)", "oklch(27% 0.10 203)", "oklch(39% 0.10 203)", "oklch(51% 0.10 203)", "oklch(63% 0.10 203)", "oklch(75% 0.10 203)", "oklch(87% 0.10 203)", "oklch(95% 0.10 203)"]
+      },
+      "danger": {
+        "role": "secondary",
+        "displayName": "Danger Red",
+        "canonical": "#a72920",
+        "tonalRamp": ["oklch(15% 0.15 29)", "oklch(27% 0.15 29)", "oklch(39% 0.15 29)", "oklch(51% 0.15 29)", "oklch(63% 0.15 29)", "oklch(75% 0.15 29)", "oklch(87% 0.15 29)", "oklch(95% 0.15 29)"]
+      }
+    },
+    "typographyMeta": {
+      "body": {
+        "displayName": "Operational Body",
+        "purpose": "Requests, fields, and general Overlay copy."
+      },
+      "title": {
+        "displayName": "Strip Title",
+        "purpose": "Current source, task, and phase identity."
+      },
+      "control": {
+        "displayName": "Action Control",
+        "purpose": "Buttons and actionable summaries."
+      },
+      "label": {
+        "displayName": "Instrument Label",
+        "purpose": "Scope labels, helper text, and compact status detail."
+      },
+      "machine": {
+        "displayName": "Machine Readout",
+        "purpose": "Task codes, counts, paths, logs, and diffs with tabular numerals."
+      }
+    },
+    "shadows": [
+      {
+        "name": "toolbar-lift",
+        "value": "0 5px 18px rgb(0 0 0 / 28%)",
+        "purpose": "Separates the compact toolbar from an unknown host page."
+      },
+      {
+        "name": "strip-lift",
+        "value": "0 7px 24px rgb(0 0 0 / 30%)",
+        "purpose": "Lifts the active request, progress, or review strip."
+      },
+      {
+        "name": "hint-lift",
+        "value": "0 4px 14px rgb(0 0 0 / 24%)",
+        "purpose": "Keeps the transient selection hint legible over page content."
+      },
+      {
+        "name": "focus-backstop",
+        "value": "0 0 0 5px #9f3108",
+        "purpose": "Backs the warm three-pixel focus outline on keyboard targets."
+      }
+    ],
+    "motion": [
+      {
+        "name": "connection-tick",
+        "value": "dispatch-tick 1.1s steps(2, end) infinite",
+        "purpose": "Pulses connecting and reconnecting state dots without ambient smooth motion."
+      },
+      {
+        "name": "task-route",
+        "value": "task-route 1.25s cubic-bezier(.16, 1, .3, 1) infinite",
+        "purpose": "Routes the active progress segment across its three-pixel track."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "none",
+        "purpose": "Disables both state-dot and progress-track animation when reduced motion is requested."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact-overlay",
+        "value": "600px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Mode Toolbar",
+      "kind": "nav",
+      "refersTo": "toolbar",
+      "description": "The compact selection-mode switcher and labeled Bridge connection state.",
+      "html": "<nav class=\"ds-toolbar\" aria-label=\"Visual Bridge selection mode\"><span class=\"ds-brand\"><span class=\"ds-brand-signal\" aria-hidden=\"true\"></span>Visual Bridge</span><div class=\"ds-mode-tabs\"><button class=\"ds-mode-tab\" type=\"button\" aria-pressed=\"true\">요소</button><button class=\"ds-mode-tab\" type=\"button\" aria-pressed=\"false\">여러 요소</button><button class=\"ds-mode-tab\" type=\"button\" aria-pressed=\"false\">영역</button><button class=\"ds-mode-tab\" type=\"button\" aria-pressed=\"false\">페이지</button></div><span class=\"ds-connection\"><span class=\"ds-state-dot\" aria-hidden=\"true\"></span>연결됨</span></nav>",
+      "css": ".ds-toolbar { display:flex; align-items:stretch; min-height:38px; padding:4px; background:#20211f; border:1px solid #080907; border-radius:4px 4px 9px 4px; box-shadow:0 5px 18px rgb(0 0 0 / 28%); color:#f9f4e9; font:400 13px/1.4 -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif; } .ds-brand { display:flex; align-items:center; gap:7px; padding:0 10px 0 7px; border-right:1px solid #4a4b46; white-space:nowrap; font-weight:650; letter-spacing:-0.01em; } .ds-brand-signal { width:8px; height:8px; background:#cf450f; border:1px solid #ffb58e; } .ds-mode-tabs { display:flex; gap:2px; margin-left:4px; } .ds-mode-tab { min-width:48px; min-height:28px; padding:4px 9px; border:1px solid transparent; border-radius:3px; background:transparent; color:#ded9cf; cursor:pointer; font:inherit; } .ds-mode-tab:hover { background:#3a3b37; color:#fffaf0; } .ds-mode-tab[aria-pressed=\"true\"] { background:#cf450f; border-color:#f18755; color:#fff; font-weight:700; } .ds-mode-tab:focus-visible { outline:3px solid #fffaf0; outline-offset:2px; box-shadow:0 0 0 5px #9f3108; } .ds-connection { display:flex; align-items:center; gap:6px; margin-left:5px; padding:4px 8px; border-left:1px solid #4a4b46; color:#c5c1b8; font-size:11px; white-space:nowrap; } .ds-state-dot { width:7px; height:7px; border:1px solid #087f8c; background:#087f8c; }"
+    },
+    {
+      "name": "Flight Strip",
+      "kind": "card",
+      "refersTo": "strip",
+      "description": "The stable task surface reused for request, progress, and review phases.",
+      "html": "<section class=\"ds-strip\" aria-label=\"Task progress\"><header class=\"ds-strip-head\"><span class=\"ds-strip-title\">헤더 간격 조정</span><span class=\"ds-strip-code\">TASK 01A4C8D2</span></header><div class=\"ds-strip-body\"><div class=\"ds-status-row\"><span class=\"ds-phase-mark\" aria-hidden=\"true\"></span><span class=\"ds-phase-copy\"><strong>코드 수정 중</strong><span>선택한 컴포넌트를 찾았습니다.</span></span><span class=\"ds-phase-count\">2 files</span></div><div class=\"ds-progress-track\"><span></span></div></div></section>",
+      "css": ".ds-strip { width:min(408px,calc(100vw - 24px)); overflow:hidden; background:#f4efe3; border:1px solid #272821; border-radius:4px 4px 11px 4px; box-shadow:0 7px 24px rgb(0 0 0 / 30%); color:#1b1c1a; font:400 13px/1.4 -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif; } .ds-strip-head { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; min-height:34px; padding:6px 9px 6px 11px; background:#20211f; color:#f8f3e9; } .ds-strip-title { overflow:hidden; font-weight:680; letter-spacing:-0.01em; text-overflow:ellipsis; white-space:nowrap; } .ds-strip-code,.ds-phase-count { color:#bdb9b0; font:400 10px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; font-variant-numeric:tabular-nums; } .ds-strip-code { margin-left:10px; } .ds-strip-body { padding:11px; } .ds-status-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:8px; padding-bottom:9px; border-bottom:1px solid #b7b0a1; } .ds-phase-mark { width:10px; height:10px; background:#cf450f; border:1px solid #9f3108; } .ds-phase-copy { display:grid; min-width:0; } .ds-phase-copy strong { letter-spacing:-0.01em; } .ds-phase-copy span { overflow:hidden; color:#64635b; font-size:10px; text-overflow:ellipsis; white-space:nowrap; } .ds-phase-count { color:#64635b; } .ds-progress-track { height:3px; margin:8px 0 0; overflow:hidden; background:#d4cec1; } .ds-progress-track span { display:block; width:32%; height:100%; background:#cf450f; animation:ds-task-route 1.25s cubic-bezier(.16,1,.3,1) infinite; } @keyframes ds-task-route { from { transform:translateX(-105%); } to { transform:translateX(315%); } } @media (prefers-reduced-motion:reduce) { .ds-progress-track span { animation:none; } }"
+    },
+    {
+      "name": "Request Field",
+      "kind": "input",
+      "refersTo": "request-field",
+      "description": "The IME-safe natural-language request field on the warm task strip.",
+      "html": "<label class=\"ds-field-label\" for=\"ds-request\">수정 요청</label><textarea class=\"ds-request-field\" id=\"ds-request\" placeholder=\"선택한 화면을 어떻게 바꿀까요?\"></textarea><p class=\"ds-input-note\">Enter로 보내기 · Shift+Enter로 줄바꿈</p>",
+      "css": ".ds-field-label { display:grid; gap:3px; color:#64635b; font:400 10px/1.4 -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif; } .ds-request-field { display:block; width:100%; min-height:86px; max-height:180px; resize:vertical; padding:9px 10px; border:1px solid #888276; border-radius:3px; outline:none; background:#fffaf0; color:#1b1c1a; font:400 13px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif; } .ds-request-field::placeholder { color:#706e67; } .ds-request-field:focus-visible { outline:3px solid #fffaf0; outline-offset:2px; box-shadow:0 0 0 5px #9f3108; } .ds-input-note { margin:6px 0 0; color:#64635b; font:400 10px/1.4 -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif; }"
+    },
+    {
+      "name": "Primary Action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single active dispatch, accept, or follow-up action.",
+      "html": "<button class=\"ds-button-primary\" type=\"button\">요청 보내기</button>",
+      "css": ".ds-button-primary { min-height:34px; padding:6px 11px; border:1px solid #9f3108; border-radius:3px; background:#cf450f; color:#fff; cursor:pointer; font:650 13px/1.4 -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif; } .ds-button-primary:hover { background:#bd3d0d; } .ds-button-primary:focus-visible { outline:3px solid #fffaf0; outline-offset:2px; box-shadow:0 0 0 5px #9f3108; } .ds-button-primary:disabled { cursor:not-allowed; opacity:.52; }"
+    },
+    {
+      "name": "Secondary Action",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A graphite action for follow-up or starting a new request.",
+      "html": "<button class=\"ds-button-secondary\" type=\"button\">후속 수정</button>",
+      "css": ".ds-button-secondary { min-height:34px; padding:6px 11px; border:1px solid #11120f; border-radius:3px; background:#30312e; color:#fffaf0; cursor:pointer; font:650 13px/1.4 -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif; } .ds-button-secondary:hover { background:#464741; } .ds-button-secondary:focus-visible { outline:3px solid #fffaf0; outline-offset:2px; box-shadow:0 0 0 5px #9f3108; } .ds-button-secondary:disabled { cursor:not-allowed; opacity:.52; }"
+    },
+    {
+      "name": "Danger Action",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "The explicit task-revert action, kept outlined and text-labeled.",
+      "html": "<button class=\"ds-button-danger\" type=\"button\">되돌리기</button>",
+      "css": ".ds-button-danger { min-height:34px; padding:6px 11px; border:1px solid #a72920; border-radius:3px; background:transparent; color:#a72920; cursor:pointer; font:650 13px/1.4 -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif; } .ds-button-danger:hover { background:#f8dfdb; } .ds-button-danger:focus-visible { outline:3px solid #fffaf0; outline-offset:2px; box-shadow:0 0 0 5px #9f3108; } .ds-button-danger:disabled { cursor:not-allowed; opacity:.52; }"
+    },
+    {
+      "name": "Selection Reticle",
+      "kind": "custom",
+      "refersTo": "selection-reticle",
+      "description": "The double-line, registration-marked geometry shown around a selected target.",
+      "html": "<div class=\"ds-reticle\" aria-label=\"Selected target\"><span class=\"ds-reticle-label\">1</span></div>",
+      "css": ".ds-reticle { position:relative; width:180px; height:72px; border:2px solid #cf450f; outline:1px solid #fffaf0; outline-offset:2px; } .ds-reticle::before,.ds-reticle::after { position:absolute; width:9px; height:9px; content:\"\"; border-color:#20211f; border-style:solid; } .ds-reticle::before { top:-5px; left:-5px; border-width:2px 0 0 2px; } .ds-reticle::after { right:-5px; bottom:-5px; border-width:0 2px 2px 0; } .ds-reticle-label { position:absolute; top:-22px; left:-2px; min-width:20px; height:18px; padding:1px 5px; background:#20211f; border:1px solid #fffaf0; color:#fffaf0; font:700 11px/14px ui-monospace,SFMono-Regular,Consolas,monospace; text-align:center; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Flight Strip Console",
+    "overview": "The Overlay behaves like an air-traffic flight-strip board placed temporarily over the application: compact task strips carry identity, intent, phase, and outcome without obscuring the scene underneath. The selected page element remains the “airspace”; the Bridge UI only introduces the controls needed to route one change safely from request to review.\n\nThe implemented system is operational rather than decorative. Dense information is aligned, machine facts use tabular numerals, and one active accent moves from selection to dispatch to progress. Matte surfaces, hard rules, asymmetric corners, and registration marks give it the character of physical control-room equipment without imitating a generic developer dashboard.",
+    "keyCharacteristics": [
+      "compact, asymmetrically rounded strips with stable alignment and tabular status data",
+      "one dispatch-orange active signal with quieter queued and completed states",
+      "double-line page-relative selection marks that remain legible over arbitrary sites",
+      "step-based connection pulses and routed progress with a reduced-motion fallback"
+    ],
+    "rules": [
+      {
+        "name": "The One Active Signal Rule",
+        "body": "Only the current task, selected mode, selection geometry, or primary action receives dispatch orange; queued, secondary, and completed controls remain neutral or verified.",
+        "section": "colors"
+      },
+      {
+        "name": "The Instrument Label Rule",
+        "body": "Monospace communicates machine-resolved facts; natural-language requests and actions stay in the UI sans face.",
+        "section": "typography"
+      },
+      {
+        "name": "The Host Independence Rule",
+        "body": "Every Overlay surface, selection mark, and focus state remains readable when the host page is pure white or pure black.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do reserve dispatch orange for the selected mode, active route, reticle, and primary action.",
+      "Do keep the three-pixel warm outline plus five-pixel dispatch-dark backing ring on every keyboard target.",
+      "Do preserve pointer transparency outside the toolbar and active strip so the host page remains usable.",
+      "Do stop connection and route animations under `prefers-reduced-motion: reduce`."
+    ],
+    "donts": [
+      "Don't add gradients, glow, or blur-dependent glass to Overlay surfaces.",
+      "Don't turn three-pixel controls, square state marks, or review blocks into pill-shaped UI.",
+      "Don't encode connection, phase, verification, or danger using color without a label or icon.",
+      "Don't let host-page styles leak into the Shadow DOM or replace the Overlay’s explicit contrast."
+    ]
+  }
+}

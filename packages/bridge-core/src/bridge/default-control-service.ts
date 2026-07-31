@@ -1,0 +1,51 @@
+import { CodexAdapter } from "../agents/index.js";
+import { loadVisualDevConfig } from "../config/index.js";
+import { GitTransactionManager } from "../git/index.js";
+import { resolveStoragePaths, SqliteTaskStore } from "../storage/index.js";
+import { TaskService } from "../tasks/index.js";
+import type { BridgeControlContext } from "./control-context.js";
+import type { ControlService } from "./control-service.js";
+import { createTaskControlService } from "./task-control-service.js";
+
+export async function createDefaultControlService(
+  context: BridgeControlContext,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<ControlService> {
+  const loaded = await loadVisualDevConfig(context.repoRoot);
+  if (loaded.config.agent.adapter !== "codex") {
+    throw new Error(
+      `Agent adapter ${loaded.config.agent.adapter} is not implemented in this MVP build`,
+    );
+  }
+
+  const git = await GitTransactionManager.open(context.repoRoot, {
+    allowed: loaded.config.paths.allowed,
+    denied: loaded.config.paths.denied,
+  });
+  const storagePaths = await resolveStoragePaths(context.repoRoot, environment);
+  const store = new SqliteTaskStore(storagePaths.databasePath);
+  const taskService = new TaskService({
+    projectId: context.projectId,
+    workspaceRoot: context.workspaceRoot,
+    adapter: new CodexAdapter(),
+    store,
+    git,
+    maxRunMs: loaded.config.agent.maxRunMs,
+    maxPending: loaded.config.queue.maxPending,
+    resumeMode: loaded.config.agent.resumeMode,
+    environment: {},
+  });
+
+  return createTaskControlService({
+    taskService,
+    hmrWaitMs: loaded.config.verification.hmrWaitMs,
+    verificationCommands: loaded.config.verification.commands,
+    project: {
+      id: context.projectId,
+      repoRoot: context.repoRoot,
+      workspaceRoot: context.workspaceRoot,
+      mode: context.mode,
+      upstreamUrl: context.upstreamUrl,
+    },
+  });
+}

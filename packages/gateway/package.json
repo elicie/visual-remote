@@ -1,0 +1,24 @@
+{
+  "name": "@visual-remote/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@visual-remote/bridge-core": "workspace:*",
+    "http-proxy": "^1.18.1",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@types/http-proxy": "^1.17.17",
+    "@types/node": "^26.1.2",
+    "@types/ws": "^8.18.1",
+    "typescript": "^7.0.2"
+  }
+}
