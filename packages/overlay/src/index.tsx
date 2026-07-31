@@ -108,6 +108,15 @@ const CONNECTION_LABELS: Record<ConnectionState, string> = {
   unauthorized: "페어링 거부됨",
 };
 
+const CONNECTION_COMPACT_LABELS: Record<ConnectionState, string> = {
+  unpaired: "페어링",
+  connecting: "연결 중",
+  connected: "연결됨",
+  reconnecting: "재연결",
+  offline: "응답 없음",
+  unauthorized: "거부됨",
+};
+
 const ACTIVE_PHASES = new Set<TaskStatus>([
   "queued",
   "preparing",
@@ -1488,7 +1497,7 @@ function Overlay({ host }: { host: HTMLElement }) {
 
   return (
     <div class="visual-shell" data-open={open ? "true" : "false"}>
-      <nav ref={toolbarRef} class="toolbar" aria-label="Visual Bridge 선택 모드">
+      <nav ref={toolbarRef} class="toolbar" aria-label="Visual Bridge 도구">
         <span class="brand-mark">Visual Bridge</span>
         <div class="mode-tabs">
           {(
@@ -1519,9 +1528,29 @@ function Overlay({ host }: { host: HTMLElement }) {
             요청 작성
           </button>
         ) : null}
+        {token ? (
+          <a
+            class="viewer-link"
+            href={`/_visual/viewer#visual-pair=${encodeURIComponent(token)}`}
+            target="_blank"
+            rel="noopener"
+            aria-label="작업 뷰어를 새 탭에서 열기"
+          >
+            뷰어
+          </a>
+        ) : (
+          <button type="button" class="viewer-link" disabled>
+            뷰어
+          </button>
+        )}
         <span class="connection" role="status">
           <span class="state-dot" data-state={connection.state} aria-hidden="true" />
-          {CONNECTION_LABELS[connection.state]}
+          <span class="connection-label connection-label-full">
+            {CONNECTION_LABELS[connection.state]}
+          </span>
+          <span class="connection-label connection-label-compact">
+            {CONNECTION_COMPACT_LABELS[connection.state]}
+          </span>
         </span>
       </nav>
 

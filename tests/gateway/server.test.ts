@@ -109,7 +109,9 @@ describe("Gateway server", () => {
   async function startGateway(controlService: ControlService): Promise<string> {
     const directory = await mkdtemp(join(tmpdir(), "visual-overlay-"));
     const overlayBundlePath = join(directory, "client.js");
+    const viewerBundlePath = join(directory, "viewer.js");
     await writeFile(overlayBundlePath, "globalThis.__visual = true;");
+    await writeFile(viewerBundlePath, "globalThis.__visualViewer = true;");
     gateway = createGatewayServer({
       upstream: `http://127.0.0.1:${upstreamPort}`,
       pairingToken: "fixture-token",
@@ -118,6 +120,7 @@ describe("Gateway server", () => {
       host: "127.0.0.1",
       port: gatewayPort,
       overlayBundlePath,
+      viewerBundlePath,
       allowedOrigins: ["https://allowed.example"],
     });
     return (await gateway.start()).url;
@@ -166,6 +169,20 @@ describe("Gateway server", () => {
     const overlay = await fetch(`${url}/_visual/client.js`);
     expect(overlay.status).toBe(200);
     expect(await overlay.text()).toContain("__visual");
+
+    const viewer = await fetch(`${url}/_visual/viewer`);
+    expect(viewer.status).toBe(200);
+    expect(await viewer.text()).toContain(
+      '<div id="visual-viewer-root"></div>',
+    );
+
+    const viewerBundle = await fetch(`${url}/_visual/viewer.js`);
+    expect(viewerBundle.status).toBe(200);
+    expect(await viewerBundle.text()).toContain("__visualViewer");
+
+    const viewerHead = await fetch(`${url}/_visual/viewer`, { method: "HEAD" });
+    expect(viewerHead.status).toBe(200);
+    expect(await viewerHead.text()).toBe("");
 
     const unauthorized = await fetch(`${url}/_visual/api/health`);
     expect(unauthorized.status).toBe(401);

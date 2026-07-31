@@ -96,6 +96,7 @@ export const overlayStyles = String.raw`
   }
 
   .toolbar button,
+  .toolbar a,
   .toolbar .connection {
     min-height: 28px;
     border: 1px solid transparent;
@@ -104,13 +105,19 @@ export const overlayStyles = String.raw`
     color: #ded9cf;
   }
 
-  .toolbar button {
+  .toolbar button,
+  .toolbar a {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     min-width: 48px;
     padding: 4px 9px;
     cursor: pointer;
+    text-decoration: none;
   }
 
-  .toolbar button:hover {
+  .toolbar button:hover,
+  .toolbar a:hover {
     background: #3a3b37;
     color: #fffaf0;
   }
@@ -127,6 +134,10 @@ export const overlayStyles = String.raw`
     opacity: 0.48;
   }
 
+  .viewer-link {
+    margin-left: 4px;
+  }
+
   .connection {
     display: flex;
     align-items: center;
@@ -138,6 +149,10 @@ export const overlayStyles = String.raw`
     color: #c5c1b8 !important;
     font-size: 11px;
     white-space: nowrap;
+  }
+
+  .connection-label-compact {
+    display: none;
   }
 
   .state-dot {
@@ -319,6 +334,7 @@ export const overlayStyles = String.raw`
   .request-field:focus-visible,
   select:focus-visible,
   button:focus-visible,
+  .toolbar a:focus-visible,
   summary:focus-visible {
     outline: 3px solid #fffaf0;
     outline-offset: 2px;
@@ -688,13 +704,24 @@ export const overlayStyles = String.raw`
       display: none;
     }
 
-    .toolbar button {
-      min-width: 56px;
+    .toolbar button,
+    .toolbar a {
+      min-width: 46px;
       min-height: 36px;
     }
 
     .connection {
       margin-left: auto;
+      padding-right: 6px;
+      padding-left: 6px;
+    }
+
+    .connection-label-full {
+      display: none;
+    }
+
+    .connection-label-compact {
+      display: inline;
     }
 
     .strip {

@@ -10,7 +10,7 @@
     "./helpers": "./src/helpers.ts"
   },
   "scripts": {
-    "build": "esbuild src/index.tsx --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=dist/client.js",
+    "build": "esbuild src/index.tsx --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=dist/client.js && esbuild src/viewer.tsx --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=dist/viewer.js",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

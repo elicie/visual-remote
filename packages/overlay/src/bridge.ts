@@ -30,6 +30,7 @@ export interface TaskArtifacts {
   changedFiles: string[];
   diff: string;
   logs: string[];
+  unavailable: Array<"files" | "diff" | "logs">;
 }
 
 export interface TaskEventRoute {
@@ -323,10 +324,7 @@ export async function fetchProjectId(token: string): Promise<string | undefined>
         : undefined;
 }
 
-export async function fetchLatestTaskForSession(
-  token: string,
-  browserSessionId: string,
-): Promise<TaskRecord | undefined> {
+export async function fetchTasks(token: string): Promise<TaskRecord[]> {
   const value = await responseValue(
     await authorizedFetch(token, "/_visual/api/tasks"),
   );
@@ -337,14 +335,34 @@ export async function fetchLatestTaskForSession(
       ? record.tasks
       : [];
 
-  for (const candidate of tasks) {
+  return tasks.filter((candidate): candidate is TaskRecord => {
     const task = recordOf(candidate);
-    if (
-      task &&
-      typeof task.id === "string" &&
-      task.originBrowserSessionId === browserSessionId
-    ) {
-      return task as unknown as TaskRecord;
+    return (
+      typeof task?.id === "string" &&
+      typeof task.projectId === "string" &&
+      typeof task.status === "string" &&
+      typeof task.requestText === "string" &&
+      (task.scope === "instance" ||
+        task.scope === "component" ||
+        task.scope === "page" ||
+        task.scope === "project") &&
+      typeof task.originBrowserSessionId === "string" &&
+      Array.isArray(task.changedFiles) &&
+      task.changedFiles.every((file) => typeof file === "string") &&
+      typeof task.createdAt === "string"
+    );
+  });
+}
+
+export async function fetchLatestTaskForSession(
+  token: string,
+  browserSessionId: string,
+): Promise<TaskRecord | undefined> {
+  const tasks = await fetchTasks(token);
+
+  for (const candidate of tasks) {
+    if (candidate.originBrowserSessionId === browserSessionId) {
+      return candidate;
     }
   }
   return undefined;
@@ -445,7 +463,12 @@ export async function fetchTaskArtifacts(
         .slice(-40)
     : [];
 
-  return { changedFiles: files, diff, logs };
+  const unavailable: TaskArtifacts["unavailable"] = [];
+  if (filesResult.status === "rejected") unavailable.push("files");
+  if (diffResult.status === "rejected") unavailable.push("diff");
+  if (logsResult.status === "rejected") unavailable.push("logs");
+
+  return { changedFiles: files, diff, logs, unavailable };
 }
 
 export async function postTaskAction(
