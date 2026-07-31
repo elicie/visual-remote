@@ -474,8 +474,9 @@ function TaskStrip({
 
         {task.status === "unsafe" ? (
           <div class="error-banner" role="alert">
-            저장소 상태가 작업 중 바뀌어 자동 유지·되돌리기를 잠갔습니다. 아래 diff를
-            확인한 뒤 Git으로 수동 복구하세요.
+            허용 범위 밖의 파일 또는 Git 상태가 작업 중 바뀌어 자동 유지·되돌리기를
+            잠갔습니다. 아래 diff에는 허용된 경로만 표시됩니다. 작업 로그와 Git 상태를
+            확인한 뒤 Git에서 변경을 직접 유지하거나 되돌리세요.
           </div>
         ) : null}
 

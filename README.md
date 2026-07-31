@@ -133,6 +133,7 @@ paths:
     - components/**
     - styles/**
     - public/**
+    - tests/**
     - package.json
   denied:
     - .git/**

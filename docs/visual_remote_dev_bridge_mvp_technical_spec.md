@@ -537,6 +537,7 @@ paths:
     - components/**
     - styles/**
     - public/**
+    - tests/**
     - package.json
     - pnpm-lock.yaml
   denied:

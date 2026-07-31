@@ -593,6 +593,7 @@ export class TaskService {
         workspaceRoot: this.#workspaceRoot,
         contextBundlePath: contextPath,
         context,
+        allowedPatterns: this.#git.pathPolicy.allowedPatterns,
         deniedPatterns: this.#git.pathPolicy.deniedPatterns,
         ...(parent ? { parent } : {}),
       });

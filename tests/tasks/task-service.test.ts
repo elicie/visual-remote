@@ -100,6 +100,32 @@ describe("TaskService", () => {
     await service.close();
   });
 
+  it("tells the agent which paths it may modify", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const manager = await GitTransactionManager.open(fixture.root, {
+      allowed: ["src/**", "tests/**"],
+      denied: ["private/**"],
+    });
+    const adapter = new FakeAgentAdapter();
+    const store = new SqliteTaskStore(resolve(fixture.parent, "state.sqlite"));
+    const service = new TaskService({
+      projectId: "fixture-project",
+      adapter,
+      store,
+      git: manager,
+    });
+
+    service.create(context("respect the path policy"));
+    await service.waitForIdle();
+
+    expect(adapter.runs[0]?.input.prompt).toContain(
+      "Only modify paths matching these allowed patterns: src/**, tests/**.",
+    );
+    expect(adapter.runs[0]?.input.prompt).toContain("private/**");
+    await service.close();
+  });
+
   it("cancels an active adapter and still records an after snapshot", async () => {
     const fixture = await createFixtureRepository();
     cleanups.push(fixture.parent);

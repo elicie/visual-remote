@@ -14,6 +14,7 @@ export interface AgentPromptOptions {
     requestText: string;
     diffSummary: string;
   };
+  allowedPatterns: readonly string[];
   deniedPatterns: readonly string[];
 }
 
@@ -80,6 +81,7 @@ Rules:
 - Inspect the relevant source before editing.
 - Preserve unrelated existing changes.
 - Do not edit outside the repository root.
+- Only modify paths matching these allowed patterns: ${options.allowedPatterns.join(", ")}.
 - Do not access or modify denied paths: ${options.deniedPatterns.join(", ")}.
 - Do not run git commit, push, reset, clean, checkout, stash, or rebase.
 - Keep the change focused on the request.
