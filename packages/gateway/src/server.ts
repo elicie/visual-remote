@@ -24,6 +24,22 @@ import { HtmlInjectionTransform } from "./html-injector.js";
 const DEFAULT_OVERLAY_BUNDLE_PATH = fileURLToPath(
   new URL("../../../packages/overlay/dist/client.js", import.meta.url),
 );
+const DEFAULT_VIEWER_BUNDLE_PATH = fileURLToPath(
+  new URL("../../../packages/overlay/dist/viewer.js", import.meta.url),
+);
+const VIEWER_HTML = `<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Visual Bridge 작업 뷰어</title>
+  </head>
+  <body>
+    <div id="visual-viewer-root"></div>
+    <script type="module" src="/_visual/viewer.js"></script>
+  </body>
+</html>`;
 const MAX_CONTROL_BODY_BYTES = 1_048_576;
 const CONTROL_AUTH_TIMEOUT_MS = 10_000;
 
@@ -36,6 +52,7 @@ export interface GatewayOptions {
   port?: number;
   allowedOrigins?: readonly string[];
   overlayBundlePath?: string;
+  viewerBundlePath?: string;
   injectOverlay?: boolean;
 }
 
@@ -270,10 +287,12 @@ function shouldInjectHtml(
   return encoding === undefined || encoding.toLowerCase() === "identity";
 }
 
-async function serveOverlay(
+async function serveBrowserBundle(
   request: IncomingMessage,
   response: ServerResponse,
   bundlePath: string,
+  unavailableCode: string,
+  unavailableMessage: string,
 ): Promise<void> {
   if (request.method !== "GET" && request.method !== "HEAD") {
     writeApiError(response, 405, "method_not_allowed", "Only GET and HEAD are supported");
@@ -300,10 +319,24 @@ async function serveOverlay(
     writeApiError(
       response,
       503,
-      "overlay_unavailable",
-      "Overlay bundle is not built. Run the overlay build first.",
+      unavailableCode,
+      unavailableMessage,
     );
   }
+}
+
+function serveViewerHtml(request: IncomingMessage, response: ServerResponse): void {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    writeApiError(response, 405, "method_not_allowed", "Only GET and HEAD are supported");
+    return;
+  }
+
+  response.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": Buffer.byteLength(VIEWER_HTML),
+    "cache-control": "no-store",
+  });
+  response.end(request.method === "HEAD" ? undefined : VIEWER_HTML);
 }
 
 async function serveArtifact(
@@ -376,6 +409,7 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
     (options.allowedOrigins ?? []).map((origin) => new URL(origin).origin),
   );
   const overlayBundlePath = options.overlayBundlePath ?? DEFAULT_OVERLAY_BUNDLE_PATH;
+  const viewerBundlePath = options.viewerBundlePath ?? DEFAULT_VIEWER_BUNDLE_PATH;
   const injectOverlay = options.injectOverlay ?? true;
   const controlWebSocketServer = new WebSocketServer({
     noServer: true,
@@ -428,7 +462,29 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
     void (async () => {
       const path = requestPath(request);
       if (path === "/_visual/client.js") {
-        await serveOverlay(request, response, overlayBundlePath);
+        await serveBrowserBundle(
+          request,
+          response,
+          overlayBundlePath,
+          "overlay_unavailable",
+          "Overlay bundle is not built. Run the overlay build first.",
+        );
+        return;
+      }
+
+      if (path === "/_visual/viewer" || path === "/_visual/viewer/") {
+        serveViewerHtml(request, response);
+        return;
+      }
+
+      if (path === "/_visual/viewer.js") {
+        await serveBrowserBundle(
+          request,
+          response,
+          viewerBundlePath,
+          "viewer_unavailable",
+          "Viewer bundle is not built. Run the overlay build first.",
+        );
         return;
       }
 

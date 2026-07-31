@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   calculatePopoverPosition,
@@ -8,11 +8,19 @@ import {
   parsePairingFragment,
   shouldSubmitOnEnter,
 } from "@visual-remote/overlay/helpers";
-import { routeTaskEvent } from "@visual-remote/overlay/bridge";
+import {
+  fetchTaskArtifacts,
+  fetchTasks,
+  routeTaskEvent,
+} from "@visual-remote/overlay/bridge";
 import type { ServerEvent, TaskRecord } from "@visual-remote/protocol";
 
 const BROWSER_A = "00000000-0000-4000-8000-000000000001";
 const BROWSER_B = "00000000-0000-4000-8000-000000000002";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 function taskEvent(
   type: string,
@@ -161,5 +169,56 @@ describe("task event routing", () => {
         "mine",
       ),
     ).toEqual({ accept: true, bind: false, taskId: "mine" });
+  });
+});
+
+describe("task history", () => {
+  it("loads valid task records with the pairing token", async () => {
+    const task: TaskRecord = {
+      id: "task-1",
+      projectId: "project",
+      status: "accepted",
+      requestText: "change it",
+      scope: "instance",
+      originBrowserSessionId: BROWSER_A,
+      changedFiles: ["src/app.tsx"],
+      createdAt: "2026-07-31T00:00:00.000Z",
+    };
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("Authorization")).toBe(
+        "Bearer fixture-token",
+      );
+      return new Response(
+        JSON.stringify({ tasks: [task, { id: "incomplete" }] }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchTasks("fixture-token")).resolves.toEqual([task]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/_visual/api/tasks",
+      expect.objectContaining({ headers: expect.any(Headers) }),
+    );
+  });
+
+  it("keeps partial artifacts and reports unavailable detail types", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.endsWith("/diff")) {
+          return new Response(JSON.stringify({ diff: "diff --git a/file b/file" }));
+        }
+        return new Response("Bridge unavailable", { status: 503 });
+      }),
+    );
+
+    await expect(fetchTaskArtifacts("fixture-token", "task-1")).resolves.toEqual({
+      changedFiles: [],
+      diff: "diff --git a/file b/file",
+      logs: [],
+      unavailable: ["files", "logs"],
+    });
   });
 });
