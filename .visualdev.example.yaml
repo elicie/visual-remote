@@ -1,0 +1,55 @@
+version: 1
+
+project:
+  id: visual-remote
+  workspace: .
+
+gateway:
+  host: 0.0.0.0
+  port: 10001
+
+upstream:
+  port: auto
+  command:
+    - npm
+    - run
+    - dev
+    - --
+    - --host
+    - 0.0.0.0
+    - --port
+    - "{upstreamPort}"
+
+agent:
+  adapter: codex
+  maxRunMs: 900000
+
+verification:
+  hmrWaitMs: 12000
+  commands:
+    - name: typecheck
+      command: [npm, run, typecheck]
+      timeoutMs: 120000
+
+context:
+  maxElements: 8
+  maxRegionElements: 20
+  maxTextLength: 500
+
+paths:
+  allowed:
+    - src/**
+    - app/**
+    - pages/**
+    - components/**
+    - styles/**
+    - public/**
+    - package.json
+  denied:
+    - .git/**
+    - .env
+    - .env.*
+    - "**/*.pem"
+    - "**/*.key"
+    - node_modules/**
+    - dist/**

@@ -1,0 +1,24 @@
+{
+  "name": "@visual-remote/overlay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "types": "./src/index.tsx",
+  "exports": {
+    ".": "./src/index.tsx",
+    "./bridge": "./src/bridge.ts",
+    "./helpers": "./src/helpers.ts"
+  },
+  "scripts": {
+    "build": "esbuild src/index.tsx --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=dist/client.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@visual-remote/protocol": "workspace:*",
+    "preact": "^10.29.7"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "typescript": "^7.0.2"
+  }
+}

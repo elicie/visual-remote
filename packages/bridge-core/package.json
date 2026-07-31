@@ -1,0 +1,27 @@
+{
+  "name": "@visual-remote/bridge-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./control": "./src/bridge/control-service.ts",
+    "./pairing": "./src/runtime/pairing.ts",
+    "./ports": "./src/runtime/ports.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@visual-remote/protocol": "workspace:*",
+    "ws": "^8.21.1",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "@types/ws": "^8.18.1",
+    "typescript": "^7.0.2"
+  }
+}

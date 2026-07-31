@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+.playwright-cli/
+output/
+.visualdev/config.local.yaml
+.visualdev/runtime/
+*.log
+.DS_Store

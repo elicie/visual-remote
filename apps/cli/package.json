@@ -1,0 +1,29 @@
+{
+  "name": "@visual-remote/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "visual": "./dist/index.js"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./bridge": "./src/bridge.ts",
+    "./doctor": "./src/doctor.ts",
+    "./status": "./src/status.ts"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node24 --external:commander --external:http-proxy --external:ws --external:yaml --external:zod --outfile=dist/index.js --banner:js='#!/usr/bin/env node'",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@visual-remote/bridge-core": "workspace:*",
+    "@visual-remote/gateway": "workspace:*",
+    "commander": "^15.0.0",
+    "http-proxy": "^1.18.1",
+    "ws": "^8.21.1",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  }
+}
