@@ -37,6 +37,30 @@ function storedTask(): StoredTask {
 }
 
 describe("SqliteTaskStore", () => {
+  it("paginates task history with a stable timestamp and id cursor", () => {
+    const store = new SqliteTaskStore(":memory:");
+    for (const [id, createdAt] of [
+      ["old", "2026-01-01T00:00:00.000Z"],
+      ["a", "2026-01-02T00:00:00.000Z"],
+      ["b", "2026-01-02T00:00:00.000Z"],
+      ["new", "2026-01-03T00:00:00.000Z"],
+    ] as const) {
+      store.createTask({ ...storedTask(), id, createdAt });
+    }
+
+    const first = store.listTasks({ limit: 2 });
+    expect(first.map((task) => task.id)).toEqual(["new", "b"]);
+    expect(
+      store
+        .listTasks({
+          limit: 2,
+          cursor: { id: "b", createdAt: "2026-01-02T00:00:00.000Z" },
+        })
+        .map((task) => task.id),
+    ).toEqual(["a", "old"]);
+    store.close();
+  });
+
   it("persists tasks, logs, and replayable monotonically sequenced events", async () => {
     const fixture = await createFixtureRepository();
     const database = resolve(fixture.parent, "state.sqlite");

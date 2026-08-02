@@ -9,18 +9,25 @@
 import { render } from "preact";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import type { TaskRecord, TaskStatus } from "@visual-remote/protocol";
+import type { ServerEvent, TaskRecord, TaskStatus } from "@visual-remote/protocol";
 import {
-  consumePairingToken,
+  BridgeConnection,
+  changedFilesFromEvent,
+  consumeViewerToken,
   fetchProjectId,
   fetchTaskArtifacts,
   fetchTasks,
+  logFromEvent,
+  taskFromEvent,
+  type ConnectionSnapshot,
+  type ConnectionState,
   type TaskArtifacts,
 } from "./bridge.js";
 import { compactText } from "./helpers.js";
 import { viewerStyles } from "./viewer-styles.js";
 
 type TaskFilter = "all" | "active" | "review" | "issue";
+const TASK_PAGE_SIZE = 100;
 
 interface DetailState extends TaskArtifacts {
   taskId: string;
@@ -60,6 +67,14 @@ const ACTIVE_PHASES = new Set<TaskStatus>([
 
 const REVIEW_PHASES = new Set<TaskStatus>(["review", "unsafe"]);
 const ISSUE_PHASES = new Set<TaskStatus>(["failed", "canceled", "unsafe"]);
+const STREAM_LABELS: Record<ConnectionState, string> = {
+  unpaired: "연결 필요",
+  connecting: "연결 중",
+  connected: "실시간",
+  reconnecting: "재연결 중",
+  offline: "오프라인",
+  unauthorized: "인증 만료",
+};
 
 function isIssue(task: TaskRecord): boolean {
   return ISSUE_PHASES.has(task.status) || task.verificationStatus === "failed";
@@ -138,44 +153,100 @@ function unavailableLabel(value: TaskArtifacts["unavailable"][number]): string {
   return "diff";
 }
 
+function orderedTasks(tasks: TaskRecord[]): TaskRecord[] {
+  return [...tasks]
+    .sort((left, right) =>
+      right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+    );
+}
+
+function upsertTask(tasks: TaskRecord[], nextTask: TaskRecord): TaskRecord[] {
+  const existing = tasks.findIndex((task) => task.id === nextTask.id);
+  if (existing < 0) return orderedTasks([nextTask, ...tasks]);
+  const next = [...tasks];
+  next[existing] = nextTask;
+  return orderedTasks(next);
+}
+
+function matchesQuery(task: TaskRecord, query: string): boolean {
+  const normalized = query.trim().toLocaleLowerCase("ko-KR");
+  if (!normalized) return true;
+  return [task.id, task.requestText, ...task.changedFiles].some((value) =>
+    value.toLocaleLowerCase("ko-KR").includes(normalized),
+  );
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 function Viewer() {
-  const token = useMemo(consumePairingToken, []);
+  const token = useMemo(consumeViewerToken, []);
+  const viewerSessionId = useMemo(() => crypto.randomUUID(), []);
   const selectedIdRef = useRef<string | null>(null);
+  const tasksRef = useRef<TaskRecord[]>([]);
+  const filterRef = useRef<TaskFilter>("all");
+  const queryRef = useRef("");
+  const detailAbortRef = useRef<AbortController | null>(null);
   const [projectId, setProjectId] = useState("current");
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [filter, setFilter] = useState<TaskFilter>("all");
+  const [query, setQuery] = useState("");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [loading, setLoading] = useState(Boolean(token));
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
+  const [connection, setConnection] = useState<ConnectionSnapshot>({
+    state: token ? "connecting" : "unpaired",
+    lastSequence: 0,
+  });
+
+  tasksRef.current = tasks;
+  filterRef.current = filter;
+  queryRef.current = query;
 
   const selectTask = useCallback(
-    async (task: TaskRecord | null) => {
+    async (task: TaskRecord | null, preserveDetail = false) => {
       const taskId = task?.id ?? null;
       selectedIdRef.current = taskId;
       setSelectedTaskId(taskId);
+      detailAbortRef.current?.abort();
+      detailAbortRef.current = null;
       if (!task || !token) {
         setDetail(null);
         return;
       }
 
-      setDetail({
-        taskId: task.id,
-        loading: true,
-        changedFiles: task.changedFiles,
-        diff: "",
-        logs: [],
-        unavailable: [],
-      });
+      const controller = new AbortController();
+      detailAbortRef.current = controller;
+      setDetail((current) =>
+        preserveDetail && current?.taskId === task.id
+          ? (() => {
+              const next = { ...current };
+              delete next.error;
+              return next;
+            })()
+          : {
+              taskId: task.id,
+              loading: true,
+              changedFiles: task.changedFiles,
+              diff: "",
+              logs: [],
+              unavailable: [],
+            },
+      );
       try {
-        const artifacts = await fetchTaskArtifacts(token, task.id);
+        const artifacts = await fetchTaskArtifacts(token, task.id, controller.signal);
         setDetail((current) =>
-          current?.taskId === task.id
+          current?.taskId === task.id && !controller.signal.aborted
             ? { taskId: task.id, loading: false, ...artifacts }
             : current,
         );
       } catch (error) {
+        if (isAbortError(error)) return;
         setDetail((current) =>
           current?.taskId === task.id
             ? {
@@ -185,6 +256,8 @@ function Viewer() {
               }
             : current,
         );
+      } finally {
+        if (detailAbortRef.current === controller) detailAbortRef.current = null;
       }
     },
     [token],
@@ -192,7 +265,7 @@ function Viewer() {
 
   const loadDashboard = useCallback(async () => {
     if (!token) {
-      setLoadError("페어링된 Overlay에서 뷰어를 다시 열어주세요.");
+      setLoadError("페어링된 Overlay의 ‘작업 보드’ 버튼에서 다시 열어주세요.");
       return;
     }
 
@@ -200,19 +273,28 @@ function Viewer() {
     setLoadError(null);
     try {
       const [nextTasks, nextProjectId] = await Promise.all([
-        fetchTasks(token),
+        fetchTasks(token, { limit: TASK_PAGE_SIZE }),
         fetchProjectId(token),
       ]);
-      setTasks(nextTasks);
+      const ordered = orderedTasks(nextTasks);
+      tasksRef.current = ordered;
+      setTasks(ordered);
+      setHasMore(nextTasks.length === TASK_PAGE_SIZE);
       if (nextProjectId) setProjectId(nextProjectId);
 
       const selected = selectedIdRef.current
-        ? nextTasks.find((task) => task.id === selectedIdRef.current)
+        ? ordered.find((task) => task.id === selectedIdRef.current)
         : undefined;
       const nextSelected =
-        selected && matchesFilter(selected, filter)
+        selected
+        && matchesFilter(selected, filterRef.current)
+        && matchesQuery(selected, queryRef.current)
           ? selected
-          : nextTasks.find((task) => matchesFilter(task, filter)) ?? null;
+          : ordered.find(
+              (task) =>
+                matchesFilter(task, filterRef.current)
+                && matchesQuery(task, queryRef.current),
+            ) ?? null;
       await selectTask(nextSelected);
       setRefreshedAt(new Date());
     } catch (error) {
@@ -224,17 +306,45 @@ function Viewer() {
     } finally {
       setLoading(false);
     }
-  }, [filter, selectTask, token]);
+  }, [selectTask, token]);
+
+  const loadMoreTasks = useCallback(async () => {
+    if (!token || loadingMore) return;
+    const cursor = tasksRef.current.at(-1);
+    if (!cursor) return;
+    setLoadingMore(true);
+    setLoadError(null);
+    try {
+      const page = await fetchTasks(token, {
+        limit: TASK_PAGE_SIZE,
+        cursor: { id: cursor.id, createdAt: cursor.createdAt },
+      });
+      setTasks((current) => {
+        const byId = new Map(current.map((task) => [task.id, task]));
+        for (const task of page) byId.set(task.id, task);
+        const next = orderedTasks([...byId.values()]);
+        tasksRef.current = next;
+        return next;
+      });
+      setHasMore(page.length === TASK_PAGE_SIZE);
+      setRefreshedAt(new Date());
+    } catch (error) {
+      setLoadError(`이전 작업 기록을 불러오지 못했습니다. (${errorText(error)})`);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, token]);
 
   useEffect(() => {
     void loadDashboard();
-    // The initial load should not repeat when the local filter changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, [loadDashboard]);
 
   const filteredTasks = useMemo(
-    () => tasks.filter((task) => matchesFilter(task, filter)),
-    [filter, tasks],
+    () =>
+      tasks.filter(
+        (task) => matchesFilter(task, filter) && matchesQuery(task, query),
+      ),
+    [filter, query, tasks],
   );
 
   useEffect(() => {
@@ -242,6 +352,77 @@ function Viewer() {
     if (selected && filteredTasks.some((task) => task.id === selected)) return;
     void selectTask(filteredTasks[0] ?? null);
   }, [filteredTasks, selectTask]);
+
+  const handleServerEvent = useCallback(
+    (event: ServerEvent) => {
+      setRefreshedAt(new Date());
+      const eventTask = taskFromEvent(event);
+      if (eventTask) {
+        setTasks((current) => {
+          const next = upsertTask(current, eventTask);
+          tasksRef.current = next;
+          return next;
+        });
+      }
+
+      const taskId = event.taskId ?? eventTask?.id;
+      if (!taskId || selectedIdRef.current !== taskId) return;
+
+      const log = logFromEvent(event);
+      const files = changedFilesFromEvent(event);
+      if (log || files.length > 0) {
+        setDetail((current) =>
+          current?.taskId === taskId
+            ? {
+                ...current,
+                changedFiles:
+                  files.length > 0 ? files : current.changedFiles,
+                logs: log ? [...current.logs, log].slice(-40) : current.logs,
+              }
+            : current,
+        );
+      }
+
+      if (
+        [
+          "task.diff_ready",
+          "task.completed",
+          "task.failed",
+          "task.canceled",
+          "task.reverted",
+          "task.verification_result",
+        ].includes(event.type)
+      ) {
+        const latestTask =
+          eventTask ?? tasksRef.current.find((task) => task.id === taskId);
+        if (latestTask) void selectTask(latestTask, true);
+      }
+    },
+    [selectTask],
+  );
+
+  useEffect(() => {
+    if (!token) return;
+    const bridge = new BridgeConnection({
+      token,
+      mode: "viewer",
+      browserSessionId: viewerSessionId,
+      onSnapshot: (snapshot) => {
+        setConnection(snapshot);
+        if (snapshot.projectId) setProjectId(snapshot.projectId);
+      },
+      onEvent: handleServerEvent,
+    });
+    bridge.connect();
+    return () => bridge.close();
+  }, [handleServerEvent, token, viewerSessionId]);
+
+  useEffect(
+    () => () => {
+      detailAbortRef.current?.abort();
+    },
+    [],
+  );
 
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
   const selectedDetail =
@@ -282,6 +463,10 @@ function Viewer() {
           <span class="project-readout">
             <small>PROJECT</small>
             <strong>{projectId}</strong>
+          </span>
+          <span class="connection-readout" data-state={connection.state}>
+            <small>STREAM</small>
+            <strong><span aria-hidden="true" />{STREAM_LABELS[connection.state]}</strong>
           </span>
           <span class="refresh-readout">
             <small>LAST SYNC</small>
@@ -331,7 +516,7 @@ function Viewer() {
             : selectedTask
             ? `${compactText(selectedTask.requestText, 80)} 작업 상세 ${
                 selectedDetail?.loading ? "불러오는 중" : "선택됨"
-              }`
+              }, ${STREAM_LABELS[connection.state]}`
             : "선택한 작업 없음"}
         </span>
 
@@ -348,6 +533,19 @@ function Viewer() {
               </div>
             </header>
 
+            <div class="ledger-search">
+              <label>
+                <span class="visually-hidden">작업 검색</span>
+                <input
+                  type="search"
+                  value={query}
+                  placeholder="요청·파일·Task ID 검색"
+                  onInput={(event) => setQuery(event.currentTarget.value)}
+                />
+              </label>
+              <span class="machine">최근 {tasks.length}개</span>
+            </div>
+
             {loading && tasks.length === 0 ? (
               <div class="ledger-state" role="status">
                 <strong>작업 기록을 불러오는 중입니다.</strong>
@@ -358,11 +556,15 @@ function Viewer() {
                 <strong>
                   {tasks.length === 0
                     ? "아직 작업 기록이 없습니다."
+                    : query.trim()
+                      ? "검색 결과가 없습니다."
                     : "이 상태의 작업이 없습니다."}
                 </strong>
                 <span>
                   {tasks.length === 0
                     ? "Overlay에서 변경을 요청하면 여기에 기록됩니다."
+                    : query.trim()
+                      ? "다른 검색어를 입력하거나 검색을 지워보세요."
                     : "다른 상태 필터를 선택해 보세요."}
                 </span>
               </div>
@@ -392,6 +594,21 @@ function Viewer() {
                 ))}
               </ol>
             )}
+            {hasMore ? (
+              <div class="ledger-footer">
+                <button
+                  type="button"
+                  disabled={loadingMore}
+                  onClick={() => void loadMoreTasks()}
+                >
+                  {loadingMore ? "이전 기록 불러오는 중" : "이전 작업 더 보기"}
+                </button>
+              </div>
+            ) : tasks.length > 0 ? (
+              <div class="ledger-footer ledger-end">
+                <span>불러온 작업 기록의 끝입니다.</span>
+              </div>
+            ) : null}
           </aside>
 
           <section
@@ -439,26 +656,32 @@ function Viewer() {
                 </dl>
 
                 <div class="detail-scroll">
-                  {selectedTask.error?.message ? (
-                    <div class="detail-error" role="alert">
-                      <strong>작업 오류</strong>
-                      <span>{selectedTask.error.message}</span>
-                    </div>
-                  ) : null}
+                  {selectedTask.error?.message
+                  || selectedDetail?.error
+                  || (selectedDetail && selectedDetail.unavailable.length > 0) ? (
+                    <div class="detail-alerts" role="alert">
+                      {selectedTask.error?.message ? (
+                        <div class="detail-error">
+                          <strong>작업 오류</strong>
+                          <span>{selectedTask.error.message}</span>
+                        </div>
+                      ) : null}
 
-                  {selectedDetail?.error ? (
-                    <div class="detail-error" role="alert">
-                      <span>{selectedDetail.error}</span>
-                      <button type="button" onClick={() => void selectTask(selectedTask)}>다시 시도</button>
-                    </div>
-                  ) : null}
+                      {selectedDetail?.error ? (
+                        <div class="detail-error">
+                          <span>{selectedDetail.error}</span>
+                          <button type="button" onClick={() => void selectTask(selectedTask)}>다시 시도</button>
+                        </div>
+                      ) : null}
 
-                  {selectedDetail && selectedDetail.unavailable.length > 0 ? (
-                    <div class="detail-error" role="alert">
-                      <span>
-                        일부 내역을 불러오지 못했습니다: {selectedDetail.unavailable.map(unavailableLabel).join(", ")}
-                      </span>
-                      <button type="button" onClick={() => void selectTask(selectedTask)}>다시 시도</button>
+                      {selectedDetail && selectedDetail.unavailable.length > 0 ? (
+                        <div class="detail-error">
+                          <span>
+                            일부 내역을 불러오지 못했습니다: {selectedDetail.unavailable.map(unavailableLabel).join(", ")}
+                          </span>
+                          <button type="button" onClick={() => void selectTask(selectedTask)}>다시 시도</button>
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
 
@@ -524,4 +747,7 @@ style.textContent = viewerStyles;
 document.head.append(style);
 
 const root = document.getElementById("visual-viewer-root");
-if (root) render(<Viewer />, root);
+if (root) {
+  root.replaceChildren();
+  render(<Viewer />, root);
+}

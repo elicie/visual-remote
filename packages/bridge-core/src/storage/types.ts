@@ -25,6 +25,10 @@ export interface AgentLogEntry {
 export interface TaskListOptions {
   limit?: number;
   statuses?: TaskStatus[];
+  cursor?: {
+    createdAt: string;
+    id: string;
+  };
 }
 
 export interface EventReplayOptions {

@@ -14,6 +14,7 @@ export interface AgentPromptOptions {
     requestText: string;
     diffSummary: string;
   };
+  allowedPatterns: readonly string[];
   deniedPatterns: readonly string[];
 }
 
@@ -76,14 +77,20 @@ ${parent}
 The complete sanitized context bundle is available at:
 ${options.contextBundlePath}
 
+Runtime capabilities:
+- Repository inspection, file editing, and short-lived repository checks are available.
+- Direct browser or Parlane MCP control is not exposed by this Bridge invocation unless the runtime explicitly lists such a tool.
+- When a browser session is connected, the Bridge performs its configured HMR and browser checks after editing.
+
 Rules:
 - Inspect the relevant source before editing.
 - Preserve unrelated existing changes.
 - Do not edit outside the repository root.
+- Only modify paths matching these allowed patterns: ${options.allowedPatterns.join(", ")}.
 - Do not access or modify denied paths: ${options.deniedPatterns.join(", ")}.
 - Do not run git commit, push, reset, clean, checkout, stash, or rebase.
 - Keep the change focused on the request.
-- Do not start another long-running development server.
+- Do not start another long-running development server solely for visual verification.
 - Run only useful checks for the files changed.
 - When finished, summarize changed files and any unresolved uncertainty.
 `;

@@ -6,11 +6,35 @@ import type {
   TaskStatus,
 } from "@visual-remote/protocol";
 
-import { compactText, parsePairingFragment } from "./helpers.js";
+import {
+  compactText,
+  parsePairingFragment,
+  parseViewerFragment,
+} from "./helpers.js";
 
 const PAIRING_TOKEN_KEY = "visual-bridge:pairing-token";
+const VIEWER_TOKEN_KEY = "visual-bridge:viewer-token";
 const BROWSER_SESSION_KEY = "visual-bridge:browser-session";
 const LAST_SEQUENCE_KEY = "visual-bridge:last-sequence";
+const VIEWER_LAST_SEQUENCE_KEY = "visual-bridge:viewer-last-sequence";
+
+const VALID_TASK_STATUSES = new Set<TaskStatus>([
+  "queued",
+  "preparing",
+  "snapshotting_before",
+  "resolving_context",
+  "running_agent",
+  "snapshotting_after",
+  "diffing",
+  "waiting_hmr",
+  "verifying",
+  "review",
+  "accepted",
+  "reverted",
+  "failed",
+  "canceled",
+  "unsafe",
+]);
 
 export type ConnectionState =
   | "unpaired"
@@ -42,7 +66,8 @@ export interface TaskEventRoute {
 export interface BridgeConnectionOptions {
   token: string;
   browserSessionId: string;
-  getPageState: () => Record<string, unknown>;
+  mode?: "control" | "viewer";
+  getPageState?: () => Record<string, unknown>;
   onSnapshot: (snapshot: ConnectionSnapshot) => void;
   onEvent: (event: ServerEvent) => void;
 }
@@ -58,6 +83,14 @@ function safeSessionGet(key: string): string | null {
 function safeSessionSet(key: string, value: string): void {
   try {
     sessionStorage.setItem(key, value);
+  } catch {
+    // Storage can be blocked in hardened browser contexts; the live session still works.
+  }
+}
+
+function safeSessionRemove(key: string): void {
+  try {
+    sessionStorage.removeItem(key);
   } catch {
     // Storage can be blocked in hardened browser contexts; the live session still works.
   }
@@ -80,6 +113,9 @@ function recordOf(value: unknown): Record<string, unknown> | null {
 export function consumePairingToken(): string | null {
   const parsed = parsePairingFragment(location.hash);
   if (parsed.token) {
+    if (safeSessionGet(PAIRING_TOKEN_KEY) !== parsed.token) {
+      safeSessionRemove(LAST_SEQUENCE_KEY);
+    }
     safeSessionSet(PAIRING_TOKEN_KEY, parsed.token);
     const nextUrl = `${location.pathname}${location.search}${parsed.remainingHash}`;
     history.replaceState(history.state, "", nextUrl);
@@ -87,6 +123,21 @@ export function consumePairingToken(): string | null {
   }
 
   return safeSessionGet(PAIRING_TOKEN_KEY);
+}
+
+export function consumeViewerToken(): string | null {
+  const parsed = parseViewerFragment(location.hash);
+  if (parsed.token) {
+    if (safeSessionGet(VIEWER_TOKEN_KEY) !== parsed.token) {
+      safeSessionRemove(VIEWER_LAST_SEQUENCE_KEY);
+    }
+    safeSessionSet(VIEWER_TOKEN_KEY, parsed.token);
+    const nextUrl = `${location.pathname}${location.search}${parsed.remainingHash}`;
+    history.replaceState(history.state, "", nextUrl);
+    return parsed.token;
+  }
+
+  return safeSessionGet(VIEWER_TOKEN_KEY);
 }
 
 export function getBrowserSessionId(): string {
@@ -100,9 +151,11 @@ export function getBrowserSessionId(): string {
   return id;
 }
 
-function readLastSequence(): number {
-  const parsed = Number.parseInt(safeSessionGet(LAST_SEQUENCE_KEY) ?? "0", 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+function readLastSequence(key: string): number | null {
+  const raw = safeSessionGet(key);
+  if (raw === null) return null;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function websocketUrl(): string {
@@ -115,7 +168,9 @@ export class BridgeConnection {
   readonly browserSessionId: string;
 
   private readonly token: string;
+  private readonly mode: "control" | "viewer";
   private readonly getPageState: () => Record<string, unknown>;
+  private readonly sequenceStorageKey: string;
   private readonly onSnapshot: (snapshot: ConnectionSnapshot) => void;
   private readonly onEvent: (event: ServerEvent) => void;
   private socket: WebSocket | null = null;
@@ -125,12 +180,19 @@ export class BridgeConnection {
   private manuallyClosed = false;
   private state: ConnectionState = "connecting";
   private projectId: string | undefined;
-  private lastSequence = readLastSequence();
+  private lastSequence: number;
+  private hasReplaySequence: boolean;
 
   constructor(options: BridgeConnectionOptions) {
     this.token = options.token;
     this.browserSessionId = options.browserSessionId;
-    this.getPageState = options.getPageState;
+    this.mode = options.mode ?? "control";
+    this.getPageState = options.getPageState ?? (() => ({}));
+    this.sequenceStorageKey =
+      this.mode === "viewer" ? VIEWER_LAST_SEQUENCE_KEY : LAST_SEQUENCE_KEY;
+    const storedSequence = readLastSequence(this.sequenceStorageKey);
+    this.lastSequence = storedSequence ?? 0;
+    this.hasReplaySequence = storedSequence !== null || this.mode === "control";
     this.onSnapshot = options.onSnapshot;
     this.onEvent = options.onEvent;
   }
@@ -189,16 +251,6 @@ export class BridgeConnection {
 
       // Pairing is intentionally the first frame on every socket.
       this.send("auth", { token: this.token });
-      this.send("browser.hello", {
-        lastSeq: this.lastSequence,
-        ...this.getPageState(),
-      });
-      this.heartbeatTimer = window.setInterval(() => {
-        this.send("browser.heartbeat", {
-          lastSeq: this.lastSequence,
-          ...this.getPageState(),
-        });
-      }, 15_000);
     });
 
     socket.addEventListener("message", (message) => {
@@ -236,6 +288,18 @@ export class BridgeConnection {
         typeof parsed.projectId === "string" ? parsed.projectId : this.projectId;
       this.state = "connected";
       this.emitSnapshot();
+      this.send("browser.hello", {
+        ...(this.hasReplaySequence ? { lastSeq: this.lastSequence } : {}),
+        ...(this.mode === "control" ? this.getPageState() : {}),
+      });
+      if (this.mode === "control") {
+        this.heartbeatTimer = window.setInterval(() => {
+          this.send("browser.heartbeat", {
+            lastSeq: this.lastSequence,
+            ...this.getPageState(),
+          });
+        }, 15_000);
+      }
       return;
     }
 
@@ -246,9 +310,11 @@ export class BridgeConnection {
       return;
     }
 
-    if (typeof parsed.seq === "number" && parsed.seq > this.lastSequence) {
+    if (typeof parsed.seq === "number") {
+      if (parsed.seq <= this.lastSequence && this.hasReplaySequence) return;
       this.lastSequence = parsed.seq;
-      safeSessionSet(LAST_SEQUENCE_KEY, String(this.lastSequence));
+      this.hasReplaySequence = true;
+      safeSessionSet(this.sequenceStorageKey, String(this.lastSequence));
       this.emitSnapshot();
     }
     if (typeof parsed.projectId === "string") {
@@ -309,6 +375,20 @@ async function responseValue(response: Response): Promise<unknown> {
   return text ? safeJsonParse(text) : null;
 }
 
+export async function fetchViewerUrl(token: string): Promise<string> {
+  const value = await responseValue(
+    await authorizedFetch(token, "/_visual/api/viewer-session"),
+  );
+  const viewerUrl = recordOf(value)?.viewerUrl;
+  if (
+    typeof viewerUrl !== "string"
+    || !viewerUrl.startsWith("/_visual/viewer#visual-view=")
+  ) {
+    throw new Error("Bridge returned an invalid viewer session URL");
+  }
+  return viewerUrl;
+}
+
 export async function fetchProjectId(token: string): Promise<string | undefined> {
   const value = await responseValue(
     await authorizedFetch(token, "/_visual/api/project"),
@@ -324,9 +404,25 @@ export async function fetchProjectId(token: string): Promise<string | undefined>
         : undefined;
 }
 
-export async function fetchTasks(token: string): Promise<TaskRecord[]> {
+export interface FetchTasksOptions {
+  limit?: number;
+  cursor?: Pick<TaskRecord, "createdAt" | "id">;
+}
+
+export async function fetchTasks(
+  token: string,
+  options: FetchTasksOptions = {},
+): Promise<TaskRecord[]> {
+  const search = new URLSearchParams();
+  if (options.limit !== undefined) search.set("limit", String(options.limit));
+  if (options.cursor !== undefined) {
+    search.set("before", options.cursor.createdAt);
+    search.set("beforeId", options.cursor.id);
+  }
+  const serializedSearch = search.toString();
+  const query = serializedSearch ? `?${serializedSearch}` : "";
   const value = await responseValue(
-    await authorizedFetch(token, "/_visual/api/tasks"),
+    await authorizedFetch(token, `/_visual/api/tasks${query}`),
   );
   const record = recordOf(value);
   const tasks = Array.isArray(value)
@@ -341,6 +437,7 @@ export async function fetchTasks(token: string): Promise<TaskRecord[]> {
       typeof task?.id === "string" &&
       typeof task.projectId === "string" &&
       typeof task.status === "string" &&
+      VALID_TASK_STATUSES.has(task.status as TaskStatus) &&
       typeof task.requestText === "string" &&
       (task.scope === "instance" ||
         task.scope === "component" ||
@@ -437,13 +534,22 @@ function logLineFromValue(value: unknown): string | null {
 export async function fetchTaskArtifacts(
   token: string,
   taskId: string,
+  signal?: AbortSignal,
 ): Promise<TaskArtifacts> {
   const base = `/_visual/api/tasks/${encodeURIComponent(taskId)}`;
+  const requestInit = signal === undefined ? undefined : { signal };
   const [filesResult, diffResult, logsResult] = await Promise.allSettled([
-    authorizedFetch(token, `${base}/files`).then(responseValue),
-    authorizedFetch(token, `${base}/diff`).then(responseValue),
-    authorizedFetch(token, `${base}/logs`).then(responseValue),
+    authorizedFetch(token, `${base}/files`, requestInit).then(responseValue),
+    authorizedFetch(token, `${base}/diff`, requestInit).then(responseValue),
+    authorizedFetch(token, `${base}/logs`, requestInit).then(responseValue),
   ]);
+  const aborted = [filesResult, diffResult, logsResult].find(
+    (result): result is PromiseRejectedResult =>
+      result.status === "rejected"
+      && result.reason instanceof DOMException
+      && result.reason.name === "AbortError",
+  );
+  if (aborted !== undefined) throw aborted.reason;
 
   const files =
     filesResult.status === "fulfilled" ? filesFromValue(filesResult.value) : [];

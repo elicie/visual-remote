@@ -1,4 +1,6 @@
 /** Shadow-root styles for the injected Overlay client. */
+import { visualBridgeColorTokens } from "./design-tokens.js";
+
 export const overlayStyles = String.raw`
   :host {
     all: initial;
@@ -23,17 +25,7 @@ export const overlayStyles = String.raw`
   }
 
   .visual-shell {
-    --graphite: #20211f;
-    --graphite-2: #30312e;
-    --strip: #f4efe3;
-    --strip-strong: #fffaf0;
-    --ink: #1b1c1a;
-    --muted: #64635b;
-    --rule: #b7b0a1;
-    --dispatch: #cf450f;
-    --dispatch-dark: #9f3108;
-    --verified: #087f8c;
-    --danger: #a72920;
+    ${visualBridgeColorTokens}
     position: fixed;
     inset: 0;
     color: var(--ink);
@@ -136,6 +128,7 @@ export const overlayStyles = String.raw`
 
   .viewer-link {
     margin-left: 4px;
+    white-space: nowrap;
   }
 
   .connection {
@@ -707,7 +700,7 @@ export const overlayStyles = String.raw`
     .toolbar button,
     .toolbar a {
       min-width: 46px;
-      min-height: 36px;
+      min-height: 40px;
     }
 
     .connection {

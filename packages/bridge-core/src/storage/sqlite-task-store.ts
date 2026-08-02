@@ -251,16 +251,25 @@ export class SqliteTaskStore implements TaskStore {
 
   listTasks(options: TaskListOptions = {}): StoredTask[] {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 1_000));
+    const conditions: string[] = [];
+    const parameters: Array<string | number> = [];
     if (options.statuses && options.statuses.length > 0) {
       const placeholders = options.statuses.map(() => "?").join(", ");
-      const rows = this.#db
-        .prepare(`SELECT * FROM tasks WHERE status IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`)
-        .all(...options.statuses, limit) as Row[];
-      return rows.map(rowToTask);
+      conditions.push(`status IN (${placeholders})`);
+      parameters.push(...options.statuses);
     }
+    if (options.cursor) {
+      conditions.push("(created_at < ? OR (created_at = ? AND id < ?))");
+      parameters.push(
+        options.cursor.createdAt,
+        options.cursor.createdAt,
+        options.cursor.id,
+      );
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const rows = this.#db
-      .prepare("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?")
-      .all(limit) as Row[];
+      .prepare(`SELECT * FROM tasks ${where} ORDER BY created_at DESC, id DESC LIMIT ?`)
+      .all(...parameters, limit) as Row[];
     return rows.map(rowToTask);
   }
 

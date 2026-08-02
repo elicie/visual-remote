@@ -114,21 +114,29 @@ export function calculatePopoverPosition(
   };
 }
 
-export function parsePairingFragment(hash: string): PairingFragment {
+function parseTokenFragment(hash: string, key: string): PairingFragment {
   const raw = hash.startsWith("#") ? hash.slice(1) : hash;
-  if (!raw.includes("visual-pair=")) {
+  if (!raw.includes(`${key}=`)) {
     return { token: null, remainingHash: hash };
   }
 
   const params = new URLSearchParams(raw);
-  const token = params.get("visual-pair");
-  params.delete("visual-pair");
+  const token = params.get(key);
+  params.delete(key);
   const remainder = params.toString();
 
   return {
     token: token?.trim() || null,
     remainingHash: remainder ? `#${remainder}` : "",
   };
+}
+
+export function parsePairingFragment(hash: string): PairingFragment {
+  return parseTokenFragment(hash, "visual-pair");
+}
+
+export function parseViewerFragment(hash: string): PairingFragment {
+  return parseTokenFragment(hash, "visual-view");
 }
 
 export function shouldSubmitOnEnter(

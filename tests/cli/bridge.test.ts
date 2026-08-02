@@ -57,7 +57,10 @@ describe("attach CLI lifecycle", () => {
       XDG_RUNTIME_DIR: runtimeDirectory,
     };
     const bridge = await startAttachBridge(
-      { upstream: `http://127.0.0.1:${upstreamPort}` },
+      {
+        upstream: `http://127.0.0.1:${upstreamPort}`,
+        publicUrl: "https://portr.example.test/",
+      },
       {
         cwd: repoRoot,
         environment,
@@ -68,9 +71,15 @@ describe("attach CLI lifecycle", () => {
 
     try {
       expect(Number(new URL(bridge.gatewayUrl).port)).toBeGreaterThanOrEqual(10_001);
+      expect(new URL(bridge.gatewayUrl).hostname).toBe("dev");
       expect(bridge.gateway.address()?.host).toBe("0.0.0.0");
-      expect(bridge.pairingUrl).toContain("#visual-pair=");
+      expect(bridge.pairingUrl).toMatch(
+        /^https:\/\/portr\.example\.test\/#visual-pair=/,
+      );
       expect(formatBridgeSummary(bridge)).toContain("Upstream:");
+      expect(formatBridgeSummary(bridge)).toContain(
+        "Public:   https://portr.example.test/",
+      );
 
       const status = await getBridgeStatus({ cwd: repoRoot, environment });
       expect(status.running).toBe(true);
@@ -148,6 +157,60 @@ describe("Bridge process lifecycle", () => {
       }
     },
   );
+
+  it("forces only the Bridge process to exit when graceful shutdown stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      const forceExit = vi.fn();
+      const processLike = Object.assign(new EventEmitter(), {
+        exit: forceExit,
+      });
+      const bridge = {
+        close: vi.fn(() => new Promise<void>(() => undefined)),
+      } as unknown as RunningBridge;
+
+      const running = runBridgeUntilSignal(
+        bridge,
+        processLike as unknown as NonNullable<
+          Parameters<typeof runBridgeUntilSignal>[1]
+        >,
+        250,
+      );
+      const settled = running.catch((error: unknown) => error);
+      processLike.emit("SIGINT");
+      await vi.advanceTimersByTimeAsync(250);
+
+      await expect(settled).resolves.toMatchObject({
+        message: expect.stringContaining("forcing this Bridge process"),
+      });
+      expect(forceExit).toHaveBeenCalledOnce();
+      expect(forceExit).toHaveBeenCalledWith(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("exits the Bridge process after graceful shutdown even when handles remain", async () => {
+    const forceExit = vi.fn();
+    const processLike = Object.assign(new EventEmitter(), {
+      exit: forceExit,
+    });
+    const bridge = {
+      close: vi.fn(async () => undefined),
+    } as unknown as RunningBridge;
+
+    const running = runBridgeUntilSignal(
+      bridge,
+      processLike as unknown as NonNullable<
+        Parameters<typeof runBridgeUntilSignal>[1]
+      >,
+    );
+    processLike.emit("SIGINT");
+    await running;
+
+    expect(forceExit).toHaveBeenCalledOnce();
+    expect(forceExit).toHaveBeenCalledWith(0);
+  });
 
   it("races a managed child exit against terminal shutdown without double-closing", async () => {
     const processLike = new EventEmitter();

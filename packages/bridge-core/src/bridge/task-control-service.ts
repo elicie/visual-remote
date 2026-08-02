@@ -560,6 +560,48 @@ export function createTaskControlService(
     };
   };
 
+  const connectViewerWebSocket = ({
+    socket,
+  }: AuthenticatedControlSocket): (() => void) => {
+    const unsubscribe = taskService.subscribe((event) => send(socket, event));
+
+    const handleMessage = (data: RawData) => {
+      const message = parseClientMessage(data);
+      if (message === undefined) {
+        send(socket, {
+          type: "command.error",
+          payload: { code: "invalid_message", message: "Invalid viewer message" },
+        });
+        return;
+      }
+      if (message.type !== "browser.hello") {
+        send(socket, {
+          type: "command.error",
+          payload: {
+            code: "read_only_socket",
+            message: "Viewer sessions can only receive task updates",
+          },
+        });
+        return;
+      }
+
+      const payload = recordOf(message.payload);
+      if (typeof payload?.lastSeq !== "number" || !Number.isFinite(payload.lastSeq)) {
+        return;
+      }
+      const lastSeq = Math.max(0, Math.floor(payload.lastSeq));
+      for (const event of taskService.replay(lastSeq)) {
+        send(socket, event);
+      }
+    };
+
+    socket.on("message", handleMessage);
+    return () => {
+      socket.off("message", handleMessage);
+      unsubscribe();
+    };
+  };
+
   return {
     health: () => ({
       status: "ok",
@@ -578,7 +620,7 @@ export function createTaskControlService(
       mode: options.project.mode,
       upstreamUrl: options.project.upstreamUrl,
     }),
-    listTasks: () => taskService.list(),
+    listTasks: (request) => taskService.list(request),
     createTask,
     getTask: (taskId) => taskService.get(taskId),
     getTaskDiff: (taskId) => taskAction(() => ({ diff: taskService.diff(taskId) })),
@@ -594,6 +636,7 @@ export function createTaskControlService(
       }
     },
     connectWebSocket,
+    connectViewerWebSocket,
     close: async () => {
       closed = true;
       unsubscribeVerification();

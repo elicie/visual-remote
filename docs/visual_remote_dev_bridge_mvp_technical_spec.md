@@ -304,10 +304,10 @@ visual dev
 예:
 
 ```text
-Gateway:   http://127.0.0.1:3000
+Gateway:   http://dev:10001
 Upstream:  http://127.0.0.1:43121
-Public:    https://admin.dev.example
-Pair URL:  https://admin.dev.example/#visual-pair=...
+Public:    https://admin.bridge.example
+Pair URL:  https://admin.bridge.example/#visual-pair=...
 ```
 
 ### 5.3 Attach mode
@@ -316,14 +316,15 @@ Pair URL:  https://admin.dev.example/#visual-pair=...
 
 ```bash
 visual attach \
-  --upstream http://127.0.0.1:3000 \
-  --listen 3100
+  --upstream http://127.0.0.1:10002 \
+  --listen 10001 \
+  --public-url https://admin.bridge.example
 ```
 
-Portr는 원래 dev server port가 아니라 Bridge gateway port인 `3100`을 노출한다.
+Portr는 원래 dev server port가 아니라 Bridge gateway port인 `10001`을 노출한다.
 
 ```text
-Portr → 3100 Bridge gateway → 3000 existing dev server
+Portr → 10001 Bridge gateway → 10002 existing dev server
 ```
 
 ### 5.4 여러 저장소 동시 실행
@@ -491,9 +492,9 @@ project:
   workspace: .
 
 gateway:
-  host: 127.0.0.1
-  port: 3000
-  publicUrl: https://admin.dev.example
+  host: 0.0.0.0
+  port: 10001
+  publicUrl: https://admin.bridge.example
 
 upstream:
   port: auto
@@ -537,6 +538,7 @@ paths:
     - components/**
     - styles/**
     - public/**
+    - tests/**
     - package.json
     - pnpm-lock.yaml
   denied:
@@ -551,7 +553,7 @@ paths:
 
 security:
   allowedOrigins:
-    - https://admin.dev.example
+    - https://admin.bridge.example
   rotatePairingTokenOnStart: true
 ```
 
@@ -598,7 +600,7 @@ visual dev
 ### 8.3 `visual attach`
 
 ```bash
-visual attach --upstream http://127.0.0.1:3000 --listen 3100
+visual attach --upstream http://127.0.0.1:10002 --listen 10001
 ```
 
 - 기존 dev server에 proxy 방식으로 연결
@@ -629,8 +631,8 @@ $XDG_RUNTIME_DIR/visual-bridge/<repoKey>/instance.json
   "projectId": "admin-web",
   "repoRoot": "/srv/projects/admin-web",
   "pid": 21841,
-  "gatewayUrl": "http://127.0.0.1:3000",
-  "publicUrl": "https://admin.dev.example",
+  "gatewayUrl": "http://dev:10001",
+  "publicUrl": "https://admin.bridge.example",
   "status": "working",
   "activeTaskId": "tsk_01J..."
 }
@@ -1032,7 +1034,7 @@ interface BrowserSession {
 로그인 시스템 대신 Bridge 시작마다 임의 token을 만든다.
 
 ```text
-https://admin.dev.example/#visual-pair=<token>
+https://admin.bridge.example/#visual-pair=<token>
 ```
 
 브라우저 동작:
@@ -1046,6 +1048,12 @@ https://admin.dev.example/#visual-pair=<token>
 Fragment는 HTTP request에 포함되지 않으므로 Portr나 reverse proxy access log에 남지 않는다.
 
 token이 없는 브라우저에서는 앱 자체는 그대로 보이지만 Overlay 제어 UI는 비활성화한다.
+
+독립 작업 보드는 control token을 직접 전달받지 않는다. 페어링된 Overlay가
+`GET /_visual/api/viewer-session`으로 Bridge 수명에 묶인 별도 viewer token과
+`/_visual/viewer#visual-view=<token>` 주소를 발급받는다. viewer token은 작업 목록,
+상세, 파일, 로그, diff와 읽기 전용 WebSocket 이벤트만 허용하며 task 생성·취소·유지·
+되돌리기 요청은 `403 read_only_token`으로 거부한다.
 
 ### 12.3 WebSocket envelope
 

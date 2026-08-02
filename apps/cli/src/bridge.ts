@@ -40,11 +40,13 @@ export interface StartAttachBridgeOptions {
   upstream: string;
   listen?: number;
   host?: string;
+  publicUrl?: string;
 }
 
 export interface StartManagedBridgeOptions {
   listen?: number;
   host?: string;
+  publicUrl?: string;
 }
 
 export interface RunningBridge {
@@ -65,6 +67,14 @@ function normalizeUpstream(value: string): string {
   const url = new URL(value);
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new TypeError("Upstream must use http: or https:");
+  }
+  return url.toString();
+}
+
+function normalizePublicUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new TypeError("Public URL must use http: or https:");
   }
   return url.toString();
 }
@@ -97,6 +107,7 @@ interface StartBridgeCoreOptions {
   upstreamUrl: string;
   listen?: number;
   host?: string;
+  publicUrl?: string;
   managedProcess?: ManagedProcess;
   lock?: WorktreeLock;
 }
@@ -117,6 +128,12 @@ async function startBridgeCore(
       options.lock ??
       (await acquireWorktreeLock(loadedConfig.repoRoot, { environment }));
     const host = options.host ?? loadedConfig.config.gateway.host;
+    const configuredPublicUrl =
+      options.publicUrl ?? loadedConfig.config.gateway.publicUrl;
+    const publicUrl =
+      configuredPublicUrl === undefined
+        ? undefined
+        : normalizePublicUrl(configuredPublicUrl);
     const gatewayPort = await findAvailablePort(startPort(loadedConfig, options.listen), host);
     const token = generatePairingToken();
     const controlContext: BridgeControlContext = {
@@ -127,6 +144,8 @@ async function startBridgeCore(
       upstreamUrl: options.upstreamUrl,
     };
     controlService = await resolveControlService(dependencies, controlContext);
+    const allowedOrigins = new Set(loadedConfig.config.security.allowedOrigins);
+    if (publicUrl !== undefined) allowedOrigins.add(new URL(publicUrl).origin);
     gateway = createGatewayServer({
       upstream: options.upstreamUrl,
       pairingToken: token,
@@ -134,10 +153,9 @@ async function startBridgeCore(
       controlService,
       host,
       port: gatewayPort,
-      allowedOrigins: loadedConfig.config.security.allowedOrigins,
+      allowedOrigins: [...allowedOrigins],
     });
     const address = await gateway.start();
-    const publicUrl = loadedConfig.config.gateway.publicUrl;
     const pairingUrl = createPairingUrl(publicUrl ?? address.url, token);
     const instance: BridgeInstanceRecord = {
       projectId: loadedConfig.config.project.id,
@@ -207,6 +225,7 @@ export async function startAttachBridge(
       upstreamUrl: normalizeUpstream(options.upstream),
       ...(options.listen === undefined ? {} : { listen: options.listen }),
       ...(options.host === undefined ? {} : { host: options.host }),
+      ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
     },
     dependencies,
   );
@@ -257,6 +276,7 @@ export async function startManagedBridge(
         upstreamUrl,
         listen: provisionalGatewayPort,
         host,
+        ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
         managedProcess,
         lock,
       },
@@ -270,10 +290,13 @@ export async function startManagedBridge(
 
 export async function runBridgeUntilSignal(
   bridge: RunningBridge,
-  processLike: Pick<NodeJS.Process, "once" | "off"> = process,
+  processLike: Pick<NodeJS.Process, "once" | "off">
+    & Partial<Pick<NodeJS.Process, "exit">> = process,
+  gracefulTimeoutMs = 5_000,
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let stopping = false;
+    let shutdownTimeout: NodeJS.Timeout | undefined;
     const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
     const removeSignalListeners = (): void => {
       for (const signal of signals) processLike.off(signal, shutdown);
@@ -284,7 +307,38 @@ export async function runBridgeUntilSignal(
       }
       stopping = true;
       removeSignalListeners();
-      void bridge.close().then(resolve, reject);
+      const timeoutMs = Math.max(1, gracefulTimeoutMs);
+      shutdownTimeout = setTimeout(() => {
+        const error = new Error(
+          `Bridge shutdown exceeded ${timeoutMs}ms; forcing this Bridge process to exit`,
+        );
+        try {
+          processLike.exit?.(1);
+        } finally {
+          reject(error);
+        }
+      }, timeoutMs);
+      shutdownTimeout.unref();
+      void Promise.resolve()
+        .then(async () => await bridge.close())
+        .then(
+          () => {
+            if (shutdownTimeout !== undefined) clearTimeout(shutdownTimeout);
+            try {
+              processLike.exit?.(0);
+            } finally {
+              resolve();
+            }
+          },
+          (error: unknown) => {
+            if (shutdownTimeout !== undefined) clearTimeout(shutdownTimeout);
+            try {
+              processLike.exit?.(1);
+            } finally {
+              reject(error);
+            }
+          },
+        );
     };
     for (const signal of signals) processLike.once(signal, shutdown);
     void bridge.managedProcess?.exit.then(shutdown);

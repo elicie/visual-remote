@@ -69,14 +69,16 @@ corepack pnpm test
 ```bash
 node apps/cli/dist/index.js attach \
   --upstream http://127.0.0.1:10002 \
-  --listen 10001
+  --listen 10001 \
+  --public-url https://visual.example.com
 ```
 
 브리지는 `0.0.0.0:10001`에 바인딩하고 다음과 같은 주소를 출력합니다.
 
 ```text
 Gateway:  http://dev:10001
-Pair URL: http://dev:10001/#visual-pair=...
+Public:   https://visual.example.com/
+Pair URL: https://visual.example.com/#visual-pair=...
 ```
 
 브라우저에서는 일반 Gateway 주소가 아니라 처음 한 번 Pair URL을 엽니다. Pair
@@ -84,7 +86,9 @@ Pair URL: http://dev:10001/#visual-pair=...
 
 Portr를 사용한다면 원래 개발 서버 포트가 아니라 브리지 Gateway 포트 `10001`을
 노출해야 합니다. 앱 화면, 개발 서버의 HMR, 브리지 제어 채널이 한 출처를
-사용합니다.
+사용합니다. `--public-url`에는 Portr가 발급한 공개 주소를 전달합니다. 공개 주소를
+항상 사용한다면 `.visualdev/config.local.yaml`의 `gateway.publicUrl`로도 설정할 수
+있습니다.
 
 ## 개발 서버와 브리지를 함께 실행
 
@@ -101,6 +105,7 @@ project:
 gateway:
   host: 0.0.0.0
   port: 10001
+  # publicUrl: https://visual.example.com
 
 upstream:
   port: auto
@@ -133,6 +138,7 @@ paths:
     - components/**
     - styles/**
     - public/**
+    - tests/**
     - package.json
   denied:
     - .git/**
@@ -150,17 +156,24 @@ paths:
 node apps/cli/dist/index.js dev
 ```
 
-브리지가 개발 서버 프로세스를 시작하고 종료까지 관리합니다. Next.js 프로젝트는
-`next.config.*`의 `allowedDevOrigins`에 `dev`를 반드시 포함해야 합니다.
+브리지가 개발 서버 프로세스를 시작하고 종료까지 관리합니다. 프레임워크가 Host
+또는 Origin 허용 목록을 사용한다면 로컬 Gateway와 실제 Portr 호스트를 추가합니다.
 
 ## 브라우저에서 변경 요청
 
 1. 출력된 Pair URL을 엽니다.
-2. `Command+Shift+G` 또는 `Ctrl+Shift+G`를 눌러 오버레이를 엽니다.
-3. 요소 하나, 여러 요소, 영역 또는 페이지 전체를 선택합니다.
-4. 원하는 변경 내용과 적용 범위를 입력합니다.
-5. 진행 단계, 로그, 변경 파일, 차이와 검증 결과를 확인합니다.
-6. 변경을 유지하거나, 최신 작업을 되돌리거나, 후속 요청을 보냅니다.
+2. 페어링 링크로 처음 접속하면 오버레이가 자동으로 열립니다. 이후에는 `Command+Shift+G` 또는 `Ctrl+Shift+G`로 열고 닫습니다.
+3. 전체 작업 내역을 보려면 `작업 보드 ↗`를 눌러 별도 탭을 엽니다.
+4. 변경을 요청하려면 요소 하나, 여러 요소, 영역 또는 페이지 전체를 선택합니다.
+5. 원하는 변경 내용과 적용 범위를 입력합니다.
+6. 진행 단계, 로그, 변경 파일, 차이와 검증 결과를 확인합니다.
+7. 변경을 유지하거나, 최신 작업을 되돌리거나, 후속 요청을 보냅니다.
+
+작업 보드는 새 작업과 상태·로그·diff를 WebSocket으로 자동 갱신합니다. 보드에는
+별도의 읽기 전용 세션 토큰만 전달되므로 작업 생성, 취소, 유지 또는 되돌리기 API를
+호출할 수 없습니다. 연결이 끊겼을 때는 헤더의 STREAM 상태를 확인하고 수동
+`새로고침`을 복구 수단으로 사용할 수 있습니다. 요청 문구, Task ID와 변경 파일을
+검색할 수 있고, `이전 작업 더 보기`로 100개씩 과거 기록을 불러옵니다.
 
 `변경 유지`는 현재 작업 트리의 변경을 그대로 두는 동작입니다. Git 커밋이나
 푸시는 자동으로 수행하지 않습니다.
@@ -204,6 +217,7 @@ corepack pnpm audit --prod
 
 ```text
 packages/overlay/dist/client.js
+packages/overlay/dist/viewer.js
 apps/cli/dist/index.js
 ```
 

@@ -1,19 +1,11 @@
 /** Standalone task-viewer styles. */
+import { visualBridgeColorTokens } from "./design-tokens.js";
+
 export const viewerStyles = String.raw`
   :root {
     color-scheme: light;
-    --graphite: #20211f;
-    --graphite-2: #30312e;
-    --strip: #f4efe3;
-    --strip-strong: #fffaf0;
+    ${visualBridgeColorTokens}
     --canvas: #ded8cc;
-    --ink: #1b1c1a;
-    --muted: #64635b;
-    --rule: #b7b0a1;
-    --dispatch: #cf450f;
-    --dispatch-dark: #9f3108;
-    --verified: #087f8c;
-    --danger: #a72920;
   }
 
   * {
@@ -132,6 +124,7 @@ export const viewerStyles = String.raw`
   }
 
   .project-readout,
+  .connection-readout,
   .refresh-readout {
     display: grid;
     align-content: center;
@@ -141,12 +134,14 @@ export const viewerStyles = String.raw`
   }
 
   .project-readout small,
+  .connection-readout small,
   .refresh-readout small {
     color: #aaa69e;
     font: 9px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
   }
 
   .project-readout strong,
+  .connection-readout strong,
   .refresh-readout strong {
     overflow: hidden;
     color: #f6f0e5;
@@ -155,9 +150,43 @@ export const viewerStyles = String.raw`
     white-space: nowrap;
   }
 
+  .connection-readout {
+    min-width: 116px;
+  }
+
+  .connection-readout strong {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .connection-readout strong > span {
+    width: 8px;
+    height: 8px;
+    border: 1px solid #77786f;
+    background: #77786f;
+  }
+
+  .connection-readout[data-state="connected"] strong > span {
+    border-color: #4fc4d0;
+    background: var(--verified);
+  }
+
+  .connection-readout[data-state="connecting"] strong > span,
+  .connection-readout[data-state="reconnecting"] strong > span {
+    border-color: #f18755;
+    background: var(--dispatch);
+  }
+
+  .connection-readout[data-state="offline"] strong > span,
+  .connection-readout[data-state="unauthorized"] strong > span {
+    border-color: #e17e75;
+    background: var(--danger);
+  }
+
   .refresh-button {
     align-self: center;
-    min-height: 34px;
+    min-height: 38px;
     margin-left: 10px;
     padding: 6px 12px;
     border: 1px solid #5d5e58;
@@ -236,6 +265,10 @@ export const viewerStyles = String.raw`
     text-align: left;
   }
 
+  .status-rail button > span {
+    white-space: nowrap;
+  }
+
   .status-rail button:last-child {
     border-right: 0;
   }
@@ -274,7 +307,7 @@ export const viewerStyles = String.raw`
   .viewer-error button,
   .detail-error button {
     flex: none;
-    min-height: 30px;
+    min-height: 38px;
     padding: 4px 9px;
     border: 1px solid var(--danger);
     border-radius: 3px;
@@ -344,12 +377,97 @@ export const viewerStyles = String.raw`
     text-underline-offset: 2px;
   }
 
+  .ledger-search {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--rule);
+    background: #e8e2d6;
+  }
+
+  .ledger-search label {
+    min-width: 0;
+  }
+
+  .ledger-search input {
+    width: 100%;
+    min-height: 36px;
+    padding: 7px 9px;
+    border: 1px solid #8e897e;
+    border-radius: 3px;
+    background: var(--strip-strong);
+    color: var(--ink);
+  }
+
+  .ledger-search input::placeholder {
+    color: #69675f;
+  }
+
+  .ledger-search input:focus-visible {
+    outline: 3px solid var(--strip-strong);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 5px var(--dispatch-dark);
+  }
+
+  .ledger-search > span {
+    color: var(--muted);
+    font-size: 9px;
+    white-space: nowrap;
+  }
+
   .task-list {
+    flex: 1;
     min-height: 0;
     margin: 0;
     padding: 0;
     overflow: auto;
     list-style: none;
+  }
+
+  .ledger-footer {
+    flex: none;
+    padding: 8px 10px;
+    border-top: 1px solid var(--rule);
+    background: #e8e2d6;
+    text-align: center;
+  }
+
+  .ledger-footer button {
+    width: 100%;
+    min-height: 38px;
+    border: 1px solid #777268;
+    border-radius: 3px;
+    background: var(--strip-strong);
+    color: var(--ink);
+    cursor: pointer;
+    font-weight: 650;
+  }
+
+  .ledger-footer button:hover {
+    border-color: var(--dispatch-dark);
+    color: var(--dispatch-dark);
+  }
+
+  .ledger-footer button:disabled {
+    cursor: wait;
+    opacity: .65;
+  }
+
+  .ledger-end {
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  .detail-alerts {
+    display: grid;
+    gap: 7px;
+    margin-bottom: 10px;
+  }
+
+  .detail-alerts .detail-error {
+    margin: 0;
   }
 
   .task-row {
@@ -757,6 +875,10 @@ export const viewerStyles = String.raw`
   }
 
   @media (max-width: 680px) {
+    body {
+      font-size: 14px;
+    }
+
     .viewer-header {
       position: static;
       min-height: 54px;
@@ -772,7 +894,7 @@ export const viewerStyles = String.raw`
     }
 
     .refresh-button {
-      min-height: 36px;
+      min-height: 42px;
       margin-left: 0;
     }
 
@@ -790,7 +912,7 @@ export const viewerStyles = String.raw`
     }
 
     .viewer-intro p {
-      font-size: 12px;
+      font-size: 14px;
     }
 
     .read-only-mark {
@@ -804,6 +926,19 @@ export const viewerStyles = String.raw`
 
     .status-rail button {
       min-height: 44px;
+    }
+
+    .viewer-error button,
+    .detail-error button,
+    .detail-jump,
+    .ledger-search input,
+    .ledger-footer button {
+      min-height: 44px;
+    }
+
+    .detail-jump {
+      display: inline-flex;
+      align-items: center;
     }
 
     .operations-board {
@@ -853,6 +988,32 @@ export const viewerStyles = String.raw`
     .logs-block ol,
     .diff-block pre {
       max-height: 240px;
+    }
+  }
+
+  @media (max-width: 420px) {
+    .viewer-header {
+      padding: 0 8px;
+    }
+
+    .viewer-brand {
+      gap: 6px;
+      padding-right: 6px;
+    }
+
+    .viewer-brand small {
+      display: none;
+    }
+
+    .connection-readout {
+      min-width: 88px;
+      padding-right: 8px;
+      padding-left: 8px;
+    }
+
+    .refresh-button {
+      padding-right: 8px;
+      padding-left: 8px;
     }
   }
 

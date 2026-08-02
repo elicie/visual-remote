@@ -6,11 +6,14 @@ import {
   intersectionRatio,
   normalizeRect,
   parsePairingFragment,
+  parseViewerFragment,
   shouldSubmitOnEnter,
 } from "@visual-remote/overlay/helpers";
 import {
+  consumeViewerToken,
   fetchTaskArtifacts,
   fetchTasks,
+  fetchViewerUrl,
   routeTaskEvent,
 } from "@visual-remote/overlay/bridge";
 import type { ServerEvent, TaskRecord } from "@visual-remote/protocol";
@@ -105,6 +108,36 @@ describe("pairing fragments", () => {
       remainingHash: "#section-heading",
     });
   });
+
+  it("extracts a read-only viewer token independently from pairing", () => {
+    expect(parseViewerFragment("#visual-view=read-token&task=one")).toEqual({
+      token: "read-token",
+      remainingHash: "#task=one",
+    });
+    expect(parsePairingFragment("#visual-view=read-token").token).toBeNull();
+  });
+
+  it("clears a stale viewer event sequence when the viewer token changes", () => {
+    const values = new Map<string, string>([
+      ["visual-bridge:viewer-token", "old-token"],
+      ["visual-bridge:viewer-last-sequence", "84"],
+    ]);
+    vi.stubGlobal("location", {
+      hash: "#visual-view=new-token",
+      pathname: "/_visual/viewer",
+      search: "",
+    });
+    vi.stubGlobal("history", { state: null, replaceState: vi.fn() });
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    });
+
+    expect(consumeViewerToken()).toBe("new-token");
+    expect(values.get("visual-bridge:viewer-token")).toBe("new-token");
+    expect(values.has("visual-bridge:viewer-last-sequence")).toBe(false);
+  });
 });
 
 describe("request input", () => {
@@ -189,7 +222,9 @@ describe("task history", () => {
         "Bearer fixture-token",
       );
       return new Response(
-        JSON.stringify({ tasks: [task, { id: "incomplete" }] }),
+        JSON.stringify({
+          tasks: [task, { ...task, id: "unknown", status: "future-phase" }, { id: "incomplete" }],
+        }),
         { status: 200 },
       );
     });
@@ -199,6 +234,26 @@ describe("task history", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/_visual/api/tasks",
       expect.objectContaining({ headers: expect.any(Headers) }),
+    );
+  });
+
+  it("loads a viewer-scoped URL with the control pairing token", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        expect(new Headers(init?.headers).get("Authorization")).toBe(
+          "Bearer fixture-token",
+        );
+        return new Response(
+          JSON.stringify({
+            viewerUrl: "/_visual/viewer#visual-view=viewer-token",
+          }),
+        );
+      }),
+    );
+
+    await expect(fetchViewerUrl("fixture-token")).resolves.toBe(
+      "/_visual/viewer#visual-view=viewer-token",
     );
   });
 
@@ -220,5 +275,29 @@ describe("task history", () => {
       logs: [],
       unavailable: ["files", "logs"],
     });
+  });
+
+  it("cancels superseded artifact requests", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+        await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        }),
+      ),
+    );
+    const controller = new AbortController();
+    const artifacts = fetchTaskArtifacts(
+      "fixture-token",
+      "task-1",
+      controller.signal,
+    );
+    controller.abort();
+
+    await expect(artifacts).rejects.toMatchObject({ name: "AbortError" });
   });
 });

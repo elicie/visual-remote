@@ -166,7 +166,7 @@ The Overlay occupies a fixed, pointer-transparent viewport layer; only the cente
 
 Inside a strip, content follows one scan: source header → selection or phase readout → request or logs → scope, verification, diff, and actions. The request metadata row uses a flexible column plus its dispatch action; review actions wrap in place rather than opening a second panel.
 
-At 600px and below, the toolbar spans the viewport with 8px side insets, the brand mark disappears, the strip docks 8px from the sides and safe bottom edge, request metadata becomes one column, and the primary dispatch target grows from 34px to 44px high.
+At 600px and below, the toolbar spans the viewport with 8px side insets, the brand mark disappears, toolbar targets grow to 40px high, the strip docks 8px from the sides and safe bottom edge, request metadata becomes one column, and the primary dispatch target grows from 34px to 44px high.
 
 ## Elevation & Depth
 
@@ -189,7 +189,7 @@ Controls use a precise 3px radius. The toolbar uses asymmetric corners (4px 4px 
 
 ### Mode Toolbar
 
-The 38px-high graphite toolbar groups the brand signal, four selection modes, and a labeled connection state. Mode buttons are 28px high on desktop and 36px high on compact viewports; only the pressed mode uses dispatch orange.
+The 38px-high graphite toolbar groups the brand signal, four selection modes, and a labeled connection state. Mode buttons are 28px high on desktop and 40px high on compact viewports; only the pressed mode uses dispatch orange.
 
 ### Flight Strip
 
