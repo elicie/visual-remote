@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -76,6 +77,38 @@ describe("GitTransactionManager", () => {
     await expect(manager.verifyGuard(guard)).resolves.toMatchObject({
       safe: false,
       restrictedPathsChanged: true,
+      restrictedPaths: [".env"],
+    });
+  });
+
+  it("accepts a persisted legacy restricted fingerprint after an upgrade", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    await fixture.write(".env", "SECRET=unchanged\n");
+    const manager = await GitTransactionManager.open(fixture.root);
+    const guard = await manager.captureGuard();
+    const prefix = "restricted-paths-v1:";
+    expect(guard.restrictedFingerprint.startsWith(prefix)).toBe(true);
+    const entries = JSON.parse(
+      guard.restrictedFingerprint.slice(prefix.length),
+    ) as Array<[string, string]>;
+    const legacy = createHash("sha256");
+    for (const [path, fingerprint] of entries) {
+      legacy.update(path);
+      legacy.update("\0");
+      legacy.update(fingerprint);
+      legacy.update("\0");
+    }
+
+    await expect(
+      manager.verifyGuard({
+        ...guard,
+        restrictedFingerprint: legacy.digest("hex"),
+      }),
+    ).resolves.toMatchObject({
+      safe: true,
+      restrictedPathsChanged: false,
+      restrictedPaths: [],
     });
   });
 

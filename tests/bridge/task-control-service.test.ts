@@ -298,6 +298,80 @@ describe("task control service", () => {
     await control.close?.();
   });
 
+  it("streams task events to viewer sockets without accepting control messages", async () => {
+    const repoRoot = await repositoryFixture();
+    const gitManager = await GitTransactionManager.open(repoRoot, {
+      allowed: ["src/**"],
+    });
+    const taskService = new TaskService({
+      projectId: "fixture",
+      workspaceRoot: repoRoot,
+      adapter: new FakeAgentAdapter(),
+      store: new SqliteTaskStore(":memory:"),
+      git: gitManager,
+    });
+    const control = createTaskControlService({
+      taskService,
+      project: {
+        id: "fixture",
+        repoRoot,
+        workspaceRoot: repoRoot,
+        mode: "attach",
+        upstreamUrl: "http://127.0.0.1:10002",
+      },
+      hmrWaitMs: 0,
+    });
+    const viewer = new FakeControlSocket();
+    const disconnectViewer = control.connectViewerWebSocket?.({
+      socket: viewer as never,
+      request: {} as never,
+      projectId: "fixture",
+    }) as (() => void);
+
+    viewer.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          id: "viewer-create",
+          type: "task.create",
+          browserSessionId: "d33f254d-1009-4de7-99ad-7f93154e77cc",
+          payload: { contextBundle: context("fixture") },
+        }),
+      ),
+    );
+    expect(control.listTasks?.()).toEqual([]);
+    expect(viewer.sent.join("\n")).toContain("read_only_socket");
+
+    const task = control.createTask?.({
+      contextBundle: context("fixture"),
+    }) as TaskRecord;
+    await taskService.waitForIdle();
+    expect(viewer.sent.join("\n")).toContain(`\"taskId\":\"${task.id}\"`);
+
+    const replayViewer = new FakeControlSocket();
+    const disconnectReplay = control.connectViewerWebSocket?.({
+      socket: replayViewer as never,
+      request: {} as never,
+      projectId: "fixture",
+    }) as (() => void);
+    replayViewer.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          id: "viewer-hello",
+          type: "browser.hello",
+          browserSessionId: "00000000-0000-4000-8000-000000000099",
+          payload: { lastSeq: 0 },
+        }),
+      ),
+    );
+    expect(replayViewer.sent.join("\n")).toContain("task.queued");
+
+    disconnectReplay();
+    disconnectViewer();
+    await control.close?.();
+  });
+
   it("combines browser and command outcomes conservatively", () => {
     const browser: BrowserVerificationResult = {
       status: "passed",

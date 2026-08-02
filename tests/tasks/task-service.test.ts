@@ -100,6 +100,52 @@ describe("TaskService", () => {
     await service.close();
   });
 
+  it("states the capabilities available to the Bridge-launched agent", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const adapter = new FakeAgentAdapter();
+    const service = new TaskService({
+      projectId: "fixture-project",
+      adapter,
+      store: new SqliteTaskStore(":memory:"),
+      git: await GitTransactionManager.open(fixture.root),
+    });
+
+    service.create(context("edit the selected UI"));
+    await service.waitForIdle();
+
+    const prompt = adapter.runs[0]?.input.prompt ?? "";
+    expect(prompt).toContain("Runtime capabilities:");
+    expect(prompt).toContain("Direct browser or Parlane MCP control is not exposed");
+    expect(prompt).toContain("Bridge performs its configured HMR and browser checks");
+    await service.close();
+  });
+
+  it("tells the agent which paths it may modify", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const manager = await GitTransactionManager.open(fixture.root, {
+      allowed: ["src/**", "tests/**"],
+      denied: ["private/**"],
+    });
+    const adapter = new FakeAgentAdapter();
+    const service = new TaskService({
+      projectId: "fixture-project",
+      adapter,
+      store: new SqliteTaskStore(resolve(fixture.parent, "state.sqlite")),
+      git: manager,
+    });
+
+    service.create(context("respect the path policy"));
+    await service.waitForIdle();
+
+    expect(adapter.runs[0]?.input.prompt).toContain(
+      "Only modify paths matching these allowed patterns: src/**, tests/**.",
+    );
+    expect(adapter.runs[0]?.input.prompt).toContain("private/**");
+    await service.close();
+  });
+
   it("cancels an active adapter and still records an after snapshot", async () => {
     const fixture = await createFixtureRepository();
     cleanups.push(fixture.parent);
@@ -157,10 +203,15 @@ describe("TaskService", () => {
     const task = service.create(context("change a secret"));
     await service.waitForIdle();
 
-    expect(service.get(task.id)).toMatchObject({
+    const unsafeTask = service.get(task.id);
+    expect(unsafeTask).toMatchObject({
       status: "unsafe",
-      error: { code: "REPOSITORY_STATE_CHANGED" },
+      error: {
+        code: "REPOSITORY_STATE_CHANGED",
+        message: expect.stringContaining('".env"'),
+      },
     });
+    expect(unsafeTask?.error?.message).not.toContain("SECRET");
     expect(service.diff(task.id)).not.toContain("SECRET");
     await service.close();
   });
@@ -295,7 +346,10 @@ describe("TaskService", () => {
 
     expect(service.get("unsafe-recovery")).toMatchObject({
       status: "unsafe",
-      error: { code: "REPOSITORY_STATE_CHANGED" },
+      error: {
+        code: "REPOSITORY_STATE_CHANGED",
+        message: expect.stringContaining('".env"'),
+      },
       afterRef: expect.stringContaining("/after"),
       changedFiles: ["tracked.txt"],
     });

@@ -9,10 +9,18 @@ export interface AuthenticatedControlSocket {
   projectId: string;
 }
 
+export interface TaskListRequest {
+  limit?: number;
+  cursor?: {
+    createdAt: string;
+    id: string;
+  };
+}
+
 export interface ControlService {
   health(): Awaitable<unknown>;
   project(): Awaitable<unknown>;
-  listTasks?(): Awaitable<unknown>;
+  listTasks?(request?: TaskListRequest): Awaitable<unknown>;
   createTask?(payload: unknown): Awaitable<unknown>;
   getTask?(taskId: string): Awaitable<unknown | undefined>;
   getTaskDiff?(taskId: string): Awaitable<unknown | undefined>;
@@ -23,6 +31,9 @@ export interface ControlService {
   revertTask?(taskId: string): Awaitable<unknown | undefined>;
   getArtifact?(artifactId: string): Awaitable<ControlArtifact | undefined>;
   connectWebSocket?(
+    connection: AuthenticatedControlSocket,
+  ): Awaitable<void | (() => void)>;
+  connectViewerWebSocket?(
     connection: AuthenticatedControlSocket,
   ): Awaitable<void | (() => void)>;
   close?(): Awaitable<void>;

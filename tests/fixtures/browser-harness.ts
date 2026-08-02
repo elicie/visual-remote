@@ -13,8 +13,14 @@ import {
 } from "@visual-remote/bridge-core";
 import { createGatewayServer } from "@visual-remote/gateway";
 
-const gatewayPort = 10_001;
-const upstreamPort = 10_004;
+const gatewayPort = Number.parseInt(
+  process.env.VISUAL_FIXTURE_GATEWAY_PORT ?? "10001",
+  10,
+);
+const upstreamPort = Number.parseInt(
+  process.env.VISUAL_FIXTURE_UPSTREAM_PORT ?? "10004",
+  10,
+);
 const projectId = "browser-fixture";
 const pairingToken = "visual-browser-fixture-token";
 
@@ -114,7 +120,7 @@ const gateway = createGatewayServer({
 await gateway.start();
 
 process.stdout.write(
-  `Browser fixture ready: http://dev:${gatewayPort}/#visual-pair=${pairingToken}\n`,
+  `Browser fixture ready: http://127.0.0.1:${gatewayPort}/#visual-pair=${pairingToken}\n`,
 );
 
 let closing = false;

@@ -77,6 +77,7 @@ describe("visual dev config", () => {
       port: 10_001,
     });
     expect(loaded.config.upstream.port).toBe("auto");
+    expect(loaded.config.paths.allowed).toContain("tests/**");
     expect(loaded.loadedFiles).toEqual([]);
   });
 

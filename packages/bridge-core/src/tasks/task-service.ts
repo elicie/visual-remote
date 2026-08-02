@@ -15,6 +15,7 @@ import { resolveContextSources } from "../context/resolve-sources.js";
 import {
   GitTransactionManager,
   RepositorySafetyError,
+  type GuardVerification,
   type RepositoryGuard,
 } from "../git/index.js";
 import {
@@ -30,6 +31,7 @@ import type {
   AgentLogEntry,
   EventReplayOptions,
   StoredTask,
+  TaskListOptions,
   TaskStore,
 } from "../storage/index.js";
 import { buildAgentPrompt } from "./prompt.js";
@@ -116,6 +118,29 @@ function isWithin(root: string, path: string): boolean {
     candidate === "" ||
     (candidate !== ".." && !candidate.startsWith(`..${sep}`) && !candidate.startsWith("/"))
   );
+}
+
+function repositoryGuardMessage(result: GuardVerification): string {
+  const reasons = [
+    result.headChanged ? "HEAD 변경" : "",
+    result.indexChanged ? "Git index 변경" : "",
+  ].filter(Boolean);
+  if (result.restrictedPathsChanged) {
+    if (result.restrictedPaths.length === 0) {
+      reasons.push("제한 경로 변경");
+    } else {
+      const maximum = 20;
+      const paths = result.restrictedPaths
+        .slice(0, maximum)
+        .map((path) => JSON.stringify(path))
+        .join(", ");
+      const remaining = result.restrictedPaths.length - maximum;
+      reasons.push(
+        `제한 경로 변경: ${paths}${remaining > 0 ? ` 외 ${remaining}개` : ""}`,
+      );
+    }
+  }
+  return reasons.join(", ");
 }
 
 export class TaskService {
@@ -213,8 +238,8 @@ export class TaskService {
     return task ? publicTask(task) : undefined;
   }
 
-  list(): TaskRecord[] {
-    return this.#store.listTasks().map(publicTask);
+  list(options: TaskListOptions = {}): TaskRecord[] {
+    return this.#store.listTasks(options).map(publicTask);
   }
 
   diff(id: string): string {
@@ -471,16 +496,11 @@ export class TaskService {
         statusPorcelainV2: "",
       });
       if (!guardResult.safe) {
-        const reasons = [
-          guardResult.headChanged ? "HEAD changed" : "",
-          guardResult.indexChanged ? "index changed" : "",
-          guardResult.restrictedPathsChanged ? "restricted paths changed" : "",
-        ].filter(Boolean);
         const unsafe = this.#transition(taskId, "unsafe", {
           completedAt: this.#now().toISOString(),
           error: {
             code: "REPOSITORY_STATE_CHANGED",
-            message: reasons.join(", "),
+            message: repositoryGuardMessage(guardResult),
           },
         });
         this.#emit(
@@ -593,6 +613,7 @@ export class TaskService {
         workspaceRoot: this.#workspaceRoot,
         contextBundlePath: contextPath,
         context,
+        allowedPatterns: this.#git.pathPolicy.allowedPatterns,
         deniedPatterns: this.#git.pathPolicy.deniedPatterns,
         ...(parent ? { parent } : {}),
       });
@@ -646,16 +667,11 @@ export class TaskService {
 
       const guardResult = guard ? await this.#git.verifyGuard(guard) : undefined;
       if (guardResult && !guardResult.safe) {
-        const reasons = [
-          guardResult.headChanged ? "HEAD changed" : "",
-          guardResult.indexChanged ? "index changed" : "",
-          guardResult.restrictedPathsChanged ? "restricted paths changed" : "",
-        ].filter(Boolean);
         const unsafe = this.#transition(taskId, "unsafe", {
           completedAt: this.#now().toISOString(),
           error: {
             code: "REPOSITORY_STATE_CHANGED",
-            message: reasons.join(", "),
+            message: repositoryGuardMessage(guardResult),
           },
         });
         this.#emit("task.failed", { task: publicTask(unsafe), error: unsafe.error }, taskId);

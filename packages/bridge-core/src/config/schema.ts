@@ -132,6 +132,7 @@ export function createDefaultConfig(projectId: string): VisualDevConfig {
         "components/**",
         "styles/**",
         "public/**",
+        "tests/**",
         "package.json",
       ],
       denied: [

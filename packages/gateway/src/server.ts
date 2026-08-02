@@ -16,8 +16,12 @@ import {
   type ControlArtifact,
   type ControlService,
   ControlServiceError,
+  type TaskListRequest,
 } from "@visual-remote/bridge-core/control";
-import { pairingTokensMatch } from "@visual-remote/bridge-core/pairing";
+import {
+  generatePairingToken,
+  pairingTokensMatch,
+} from "@visual-remote/bridge-core/pairing";
 import { assertServicePort, MIN_SERVICE_PORT } from "@visual-remote/bridge-core/ports";
 import { HtmlInjectionTransform } from "./html-injector.js";
 
@@ -36,16 +40,31 @@ const VIEWER_HTML = `<!doctype html>
     <title>Visual Bridge 작업 뷰어</title>
   </head>
   <body>
-    <div id="visual-viewer-root"></div>
+    <div id="visual-viewer-root">
+      <p>작업 뷰어를 불러오는 중입니다.</p>
+      <noscript>작업 뷰어를 사용하려면 JavaScript를 활성화해 주세요.</noscript>
+    </div>
     <script type="module" src="/_visual/viewer.js"></script>
   </body>
 </html>`;
 const MAX_CONTROL_BODY_BYTES = 1_048_576;
 const CONTROL_AUTH_TIMEOUT_MS = 10_000;
+const VIEWER_CONTENT_SECURITY_POLICY = [
+  "default-src 'none'",
+  "script-src 'self'",
+  "style-src 'unsafe-inline'",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join("; ");
+
+type AccessLevel = "control" | "viewer";
 
 export interface GatewayOptions {
   upstream: string | URL;
   pairingToken: string;
+  viewerToken?: string;
   projectId: string;
   controlService: ControlService;
   host?: string;
@@ -129,9 +148,35 @@ function originAllowed(request: IncomingMessage, allowedOrigins: ReadonlySet<str
   }
 }
 
-function hasValidToken(request: IncomingMessage, expectedToken: string): boolean {
-  const token = extractBearerToken(request);
-  return token !== undefined && pairingTokensMatch(expectedToken, token);
+function tokenAccess(
+  token: string | undefined,
+  controlToken: string,
+  viewerToken: string,
+): AccessLevel | undefined {
+  if (token === undefined) return undefined;
+  if (pairingTokensMatch(controlToken, token)) return "control";
+  if (pairingTokensMatch(viewerToken, token)) return "viewer";
+  return undefined;
+}
+
+function requestAccess(
+  request: IncomingMessage,
+  controlToken: string,
+  viewerToken: string,
+): AccessLevel | undefined {
+  return tokenAccess(extractBearerToken(request), controlToken, viewerToken);
+}
+
+function isReadOnlyRoute(route: ApiRoute): boolean {
+  return [
+    "health",
+    "project",
+    "listTasks",
+    "getTask",
+    "getTaskDiff",
+    "getTaskFiles",
+    "getTaskLogs",
+  ].includes(route.operation);
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
@@ -155,6 +200,44 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   } catch {
     throw new ControlServiceError(400, "invalid_json", "Request body must be valid JSON");
   }
+}
+
+function parseTaskListRequest(request: IncomingMessage): TaskListRequest {
+  const url = new URL(request.url ?? "/", "http://visual.invalid");
+  const rawLimit = url.searchParams.get("limit");
+  const parsedLimit = rawLimit === null ? undefined : Number.parseInt(rawLimit, 10);
+  if (
+    rawLimit !== null
+    && (!/^\d+$/.test(rawLimit)
+      || !Number.isFinite(parsedLimit)
+      || parsedLimit === undefined
+      || parsedLimit < 1)
+  ) {
+    throw new ControlServiceError(400, "invalid_limit", "Task limit must be a positive integer");
+  }
+  const before = url.searchParams.get("before");
+  const beforeId = url.searchParams.get("beforeId");
+  if ((before === null) !== (beforeId === null)) {
+    throw new ControlServiceError(
+      400,
+      "invalid_cursor",
+      "Task cursor requires both before and beforeId",
+    );
+  }
+  if (
+    before !== null
+    && beforeId !== null
+    && (before.length > 64 || beforeId.length === 0 || beforeId.length > 256)
+  ) {
+    throw new ControlServiceError(400, "invalid_cursor", "Task cursor is invalid");
+  }
+
+  return {
+    ...(parsedLimit === undefined ? {} : { limit: Math.min(parsedLimit, 1_000) }),
+    ...(before === null || beforeId === null
+      ? {}
+      : { cursor: { createdAt: before, id: beforeId } }),
+  };
 }
 
 function parseApiRoute(method: string, path: string): ApiRoute | undefined {
@@ -235,6 +318,9 @@ async function invokeApiRoute(
   if (route.operation === "createTask") {
     return await service.createTask?.(await readJsonBody(request));
   }
+  if (route.operation === "listTasks") {
+    return await service.listTasks?.(parseTaskListRequest(request));
+  }
   if (route.taskId !== undefined) {
     return await (
       operation as (taskId: string) => unknown | Promise<unknown>
@@ -305,6 +391,7 @@ async function serveBrowserBundle(
       "content-type": "text/javascript; charset=utf-8",
       "content-length": metadata.size,
       "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
     });
     if (request.method === "HEAD") {
       response.end();
@@ -335,6 +422,11 @@ function serveViewerHtml(request: IncomingMessage, response: ServerResponse): vo
     "content-type": "text/html; charset=utf-8",
     "content-length": Buffer.byteLength(VIEWER_HTML),
     "cache-control": "no-store",
+    "content-security-policy": VIEWER_CONTENT_SECURITY_POLICY,
+    "cross-origin-opener-policy": "same-origin",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
   });
   response.end(request.method === "HEAD" ? undefined : VIEWER_HTML);
 }
@@ -396,6 +488,11 @@ function rejectUpgrade(socket: NodeJS.WritableStream, statusCode: number, reason
   }
 }
 
+function gatewayDisplayHost(host: string): string {
+  if (host === "0.0.0.0" || host === "::") return "dev";
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
 export function createGatewayServer(options: GatewayOptions): GatewayServer {
   const host = options.host ?? "0.0.0.0";
   const port = options.port ?? MIN_SERVICE_PORT;
@@ -410,6 +507,10 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
   );
   const overlayBundlePath = options.overlayBundlePath ?? DEFAULT_OVERLAY_BUNDLE_PATH;
   const viewerBundlePath = options.viewerBundlePath ?? DEFAULT_VIEWER_BUNDLE_PATH;
+  const viewerToken = options.viewerToken ?? generatePairingToken();
+  if (pairingTokensMatch(options.pairingToken, viewerToken)) {
+    throw new TypeError("Viewer token must differ from the control pairing token");
+  }
   const injectOverlay = options.injectOverlay ?? true;
   const controlWebSocketServer = new WebSocketServer({
     noServer: true,
@@ -493,13 +594,34 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
           writeApiError(response, 403, "origin_forbidden", "Request origin is not allowed");
           return;
         }
-        if (!hasValidToken(request, options.pairingToken)) {
+        const access = requestAccess(request, options.pairingToken, viewerToken);
+        if (access === undefined) {
           response.setHeader("www-authenticate", "Bearer");
           writeApiError(response, 401, "unauthorized", "A valid pairing token is required");
           return;
         }
 
         try {
+          if (path === "/_visual/api/viewer-session") {
+            if (request.method !== "GET") {
+              writeApiError(response, 405, "method_not_allowed", "Only GET is supported");
+              return;
+            }
+            if (access !== "control") {
+              writeApiError(
+                response,
+                403,
+                "control_token_required",
+                "A control pairing token is required to open a viewer session",
+              );
+              return;
+            }
+            writeJson(response, 200, {
+              viewerUrl: `/_visual/viewer#visual-view=${encodeURIComponent(viewerToken)}`,
+            });
+            return;
+          }
+
           const artifactMatch = /^\/_visual\/api\/artifacts\/([^/]+)$/.exec(path);
           if (artifactMatch !== null && request.method === "GET") {
             const artifactId = artifactMatch[1];
@@ -513,6 +635,15 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
           const route = parseApiRoute(request.method ?? "GET", path);
           if (route === undefined) {
             writeApiError(response, 404, "not_found", "Control route was not found");
+            return;
+          }
+          if (access === "viewer" && !isReadOnlyRoute(route)) {
+            writeApiError(
+              response,
+              403,
+              "read_only_token",
+              "Viewer sessions cannot change tasks",
+            );
             return;
           }
           const result = await invokeApiRoute(options.controlService, route, request);
@@ -600,7 +731,8 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
 
       webSocket.once("message", (data) => {
         const token = parseWebSocketAuth(data);
-        if (token === undefined || !pairingTokensMatch(options.pairingToken, token)) {
+        const access = tokenAccess(token, options.pairingToken, viewerToken);
+        if (access === undefined) {
           clearTimeout(timeout);
           webSocket.close(4401, "Invalid pairing token");
           return;
@@ -611,11 +743,15 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
           JSON.stringify({
             type: "auth.ok",
             projectId: options.projectId,
-            payload: { authenticated: true },
+            payload: { authenticated: true, access },
           }),
         );
+        const connect =
+          access === "viewer"
+            ? options.controlService.connectViewerWebSocket
+            : options.controlService.connectWebSocket;
         void Promise.resolve(
-          options.controlService.connectWebSocket?.({
+          connect?.({
             socket: webSocket,
             request,
             projectId: options.projectId,
@@ -669,7 +805,7 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
           currentAddress = {
             host,
             port: boundAddress.port,
-            url: `http://${host === "0.0.0.0" ? "dev" : host}:${boundAddress.port}`,
+            url: `http://${gatewayDisplayHost(host)}:${boundAddress.port}`,
           };
           resolve(currentAddress);
         };

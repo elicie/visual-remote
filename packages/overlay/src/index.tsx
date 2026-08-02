@@ -32,6 +32,7 @@ import {
   fetchLatestTaskForSession,
   fetchProjectId,
   fetchTaskArtifacts,
+  fetchViewerUrl,
   getBrowserSessionId,
   logFromEvent,
   phaseFromEvent,
@@ -55,6 +56,7 @@ import {
   calculatePopoverPosition,
   compactText,
   normalizeRect,
+  parsePairingFragment,
   shouldSubmitOnEnter,
   type Point,
   type PopoverPosition,
@@ -483,8 +485,9 @@ function TaskStrip({
 
         {task.status === "unsafe" ? (
           <div class="error-banner" role="alert">
-            저장소 상태가 작업 중 바뀌어 자동 유지·되돌리기를 잠갔습니다. 아래 diff를
-            확인한 뒤 Git으로 수동 복구하세요.
+            허용 범위 밖의 파일 또는 Git 상태가 작업 중 바뀌어 자동 유지·되돌리기를
+            잠갔습니다. 아래 diff에는 허용된 경로만 표시됩니다. 작업 오류와 Git 상태를
+            확인한 뒤 Git에서 변경을 직접 유지하거나 되돌리세요.
           </div>
         ) : null}
 
@@ -602,6 +605,10 @@ function TaskStrip({
 }
 
 function Overlay({ host }: { host: HTMLElement }) {
+  const pairedFromFragment = useMemo(
+    () => parsePairingFragment(location.hash).token !== null,
+    [],
+  );
   const token = useMemo(consumePairingToken, []);
   const browserSessionId = useMemo(getBrowserSessionId, []);
   const connectionRef = useRef<BridgeConnection | null>(null);
@@ -616,7 +623,7 @@ function Overlay({ host }: { host: HTMLElement }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLElement>(null);
 
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(pairedFromFragment);
   const [mode, setMode] = useState<SelectionMode>("element");
   const [selected, setSelected] = useState<SelectionItem[]>([]);
   const [hovered, setHovered] = useState<HTMLElement | null>(null);
@@ -631,6 +638,8 @@ function Overlay({ host }: { host: HTMLElement }) {
     lastSequence: 0,
   });
   const [projectId, setProjectId] = useState("current");
+  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
+  const [viewerUrlFailed, setViewerUrlFailed] = useState(false);
   const [task, setTask] = useState<TaskView | null>(null);
   const [followUpOpen, setFollowUpOpen] = useState(false);
   const [followUpText, setFollowUpText] = useState("");
@@ -848,6 +857,28 @@ function Overlay({ host }: { host: HTMLElement }) {
       connectionRef.current = null;
     };
   }, [browserSessionId, handleServerEvent, loadArtifacts, pageState, token]);
+
+  useEffect(() => {
+    let active = true;
+    if (!token) {
+      setViewerUrl(null);
+      return;
+    }
+    setViewerUrlFailed(false);
+    void fetchViewerUrl(token)
+      .then((url) => {
+        if (active) setViewerUrl(url);
+      })
+      .catch(() => {
+        if (active) {
+          setViewerUrl(null);
+          setViewerUrlFailed(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [token]);
 
   useEffect(() => {
     host.dataset.active = open ? "true" : "false";
@@ -1528,19 +1559,25 @@ function Overlay({ host }: { host: HTMLElement }) {
             요청 작성
           </button>
         ) : null}
-        {token ? (
+        {viewerUrl ? (
           <a
             class="viewer-link"
-            href={`/_visual/viewer#visual-pair=${encodeURIComponent(token)}`}
+            href={viewerUrl}
             target="_blank"
             rel="noopener"
-            aria-label="작업 뷰어를 새 탭에서 열기"
+            aria-label="전체화면 작업 보드를 새 탭에서 열기"
+            title="전체화면 작업 보드 열기"
           >
-            뷰어
+            작업 보드 ↗
           </a>
         ) : (
-          <button type="button" class="viewer-link" disabled>
-            뷰어
+          <button
+            type="button"
+            class="viewer-link"
+            disabled
+            title={viewerUrlFailed ? "작업 보드 연결을 준비하지 못했습니다" : "작업 보드 준비 중"}
+          >
+            작업 보드
           </button>
         )}
         <span class="connection" role="status">

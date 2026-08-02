@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  createBasicControlService,
   createGatewayServer,
   type AuthenticatedControlSocket,
   type ControlService,
@@ -115,6 +116,7 @@ describe("Gateway server", () => {
     gateway = createGatewayServer({
       upstream: `http://127.0.0.1:${upstreamPort}`,
       pairingToken: "fixture-token",
+      viewerToken: "fixture-viewer-token",
       projectId: "fixture",
       controlService,
       host: "127.0.0.1",
@@ -125,6 +127,20 @@ describe("Gateway server", () => {
     });
     return (await gateway.start()).url;
   }
+
+  it("keeps viewer and control capabilities on different tokens", () => {
+    expect(() =>
+      createGatewayServer({
+        upstream: `http://127.0.0.1:${upstreamPort}`,
+        pairingToken: "same-token",
+        viewerToken: "same-token",
+        projectId: "fixture",
+        controlService: createBasicControlService({ project: { id: "fixture" } }),
+        host: "127.0.0.1",
+        port: gatewayPort,
+      }),
+    ).toThrow("Viewer token must differ");
+  });
 
   it("injects only GET HTML and requests identity encoding upstream", async () => {
     const url = await startGateway({
@@ -154,10 +170,14 @@ describe("Gateway server", () => {
 
   it("serves the overlay and routes authenticated control requests", async () => {
     const created: unknown[] = [];
+    let taskListRequest: unknown;
     const url = await startGateway({
       health: () => ({ status: "ok" }),
       project: () => ({ id: "fixture" }),
-      listTasks: () => [{ id: "task-1" }],
+      listTasks: (request) => {
+        taskListRequest = request;
+        return [{ id: "task-1" }];
+      },
       createTask: (payload) => {
         created.push(payload);
         return { id: "task-2" };
@@ -172,8 +192,12 @@ describe("Gateway server", () => {
 
     const viewer = await fetch(`${url}/_visual/viewer`);
     expect(viewer.status).toBe(200);
+    expect(viewer.headers.get("content-security-policy")).toContain(
+      "frame-ancestors 'none'",
+    );
+    expect(viewer.headers.get("referrer-policy")).toBe("no-referrer");
     expect(await viewer.text()).toContain(
-      '<div id="visual-viewer-root"></div>',
+      '<div id="visual-viewer-root">',
     );
 
     const viewerBundle = await fetch(`${url}/_visual/viewer.js`);
@@ -194,6 +218,57 @@ describe("Gateway server", () => {
     const project = await fetch(`${url}/_visual/api/project`, { headers });
     expect(await project.json()).toEqual({ id: "fixture" });
 
+    const viewerSession = await fetch(`${url}/_visual/api/viewer-session`, {
+      headers,
+    });
+    expect(await viewerSession.json()).toEqual({
+      viewerUrl: "/_visual/viewer#visual-view=fixture-viewer-token",
+    });
+
+    const viewerHeaders = {
+      authorization: "Bearer fixture-viewer-token",
+      origin: "https://allowed.example",
+    };
+    const viewerTasks = await fetch(`${url}/_visual/api/tasks`, {
+      headers: viewerHeaders,
+    });
+    expect(await viewerTasks.json()).toEqual([{ id: "task-1" }]);
+
+    const pagedTasks = await fetch(
+      `${url}/_visual/api/tasks?limit=25&before=2026-01-02T00%3A00%3A00.000Z&beforeId=task-25`,
+      { headers: viewerHeaders },
+    );
+    expect(pagedTasks.status).toBe(200);
+    expect(taskListRequest).toEqual({
+      limit: 25,
+      cursor: {
+        createdAt: "2026-01-02T00:00:00.000Z",
+        id: "task-25",
+      },
+    });
+
+    const invalidCursor = await fetch(
+      `${url}/_visual/api/tasks?before=2026-01-02T00%3A00%3A00.000Z`,
+      { headers: viewerHeaders },
+    );
+    expect(invalidCursor.status).toBe(400);
+
+    const viewerCreate = await fetch(`${url}/_visual/api/tasks`, {
+      method: "POST",
+      headers: { ...viewerHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ request: "must stay read only" }),
+    });
+    expect(viewerCreate.status).toBe(403);
+    expect(await viewerCreate.json()).toMatchObject({
+      error: { code: "read_only_token" },
+    });
+    expect(created).toEqual([]);
+
+    const nestedViewerSession = await fetch(`${url}/_visual/api/viewer-session`, {
+      headers: viewerHeaders,
+    });
+    expect(nestedViewerSession.status).toBe(403);
+
     const tasks = await fetch(`${url}/_visual/api/tasks`, { headers });
     expect(await tasks.json()).toEqual([{ id: "task-1" }]);
 
@@ -212,6 +287,7 @@ describe("Gateway server", () => {
 
   it("preserves upstream HMR WebSockets and authenticates control WebSockets", async () => {
     let controlConnection: AuthenticatedControlSocket | undefined;
+    let viewerConnection: AuthenticatedControlSocket | undefined;
     const url = await startGateway({
       health: () => ({ status: "ok" }),
       project: () => ({ id: "fixture" }),
@@ -222,6 +298,9 @@ describe("Gateway server", () => {
             JSON.stringify({ type: "echo", payload: data.toString() }),
           );
         });
+      },
+      connectViewerWebSocket(connection) {
+        viewerConnection = connection;
       },
     });
     const wsUrl = url.replace("http:", "ws:");
@@ -248,7 +327,7 @@ describe("Gateway server", () => {
     expect(await authenticated).toEqual({
       type: "auth.ok",
       projectId: "fixture",
-      payload: { authenticated: true },
+      payload: { authenticated: true, access: "control" },
     });
     expect(controlConnection?.projectId).toBe("fixture");
 
@@ -259,6 +338,27 @@ describe("Gateway server", () => {
       payload: JSON.stringify({ type: "browser.hello" }),
     });
     control.close();
+
+    const viewerControl = await openWebSocket(
+      `${wsUrl}/_visual/ws`,
+      "https://allowed.example",
+    );
+    const viewerAuthenticated = nextMessage(viewerControl);
+    viewerControl.send(
+      JSON.stringify({
+        id: "auth-viewer",
+        type: "auth",
+        browserSessionId: "00000000-0000-4000-8000-000000000002",
+        payload: { token: "fixture-viewer-token" },
+      }),
+    );
+    expect(await viewerAuthenticated).toEqual({
+      type: "auth.ok",
+      projectId: "fixture",
+      payload: { authenticated: true, access: "viewer" },
+    });
+    expect(viewerConnection?.projectId).toBe("fixture");
+    viewerControl.close();
   });
 
   it("closes control WebSockets that exceed the one MiB payload limit", async () => {

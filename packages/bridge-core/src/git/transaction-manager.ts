@@ -40,6 +40,7 @@ export interface GuardVerification {
   headChanged: boolean;
   indexChanged: boolean;
   restrictedPathsChanged: boolean;
+  restrictedPaths: string[];
 }
 
 export interface RevertResult {
@@ -58,6 +59,71 @@ const SNAPSHOT_ENV: NodeJS.ProcessEnv = {
   GIT_COMMITTER_NAME: "Visual Bridge",
   GIT_COMMITTER_EMAIL: "visual-bridge@localhost",
 };
+
+const RESTRICTED_STATE_PREFIX = "restricted-paths-v1:";
+
+function serializeRestrictedState(entries: ReadonlyArray<readonly [string, string]>): string {
+  return `${RESTRICTED_STATE_PREFIX}${JSON.stringify(entries)}`;
+}
+
+function parseRestrictedState(value: string): Map<string, string> | undefined {
+  if (!value.startsWith(RESTRICTED_STATE_PREFIX)) return undefined;
+  try {
+    const parsed = JSON.parse(value.slice(RESTRICTED_STATE_PREFIX.length)) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    const entries = new Map<string, string>();
+    for (const entry of parsed) {
+      if (
+        !Array.isArray(entry)
+        || entry.length !== 2
+        || typeof entry[0] !== "string"
+        || typeof entry[1] !== "string"
+      ) {
+        return undefined;
+      }
+      entries.set(entry[0], entry[1]);
+    }
+    return entries;
+  } catch {
+    return undefined;
+  }
+}
+
+function legacyRestrictedFingerprint(entries: ReadonlyMap<string, string>): string {
+  const hash = createHash("sha256");
+  for (const [path, fingerprint] of [...entries].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  )) {
+    hash.update(path);
+    hash.update("\0");
+    hash.update(fingerprint);
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+function restrictedStatesMatch(before: string, after: string): boolean {
+  if (before === after) return true;
+  const beforeEntries = parseRestrictedState(before);
+  const afterEntries = parseRestrictedState(after);
+  if (beforeEntries !== undefined && afterEntries !== undefined) return false;
+  if (beforeEntries !== undefined && /^[a-f0-9]{64}$/.test(after)) {
+    return legacyRestrictedFingerprint(beforeEntries) === after;
+  }
+  if (afterEntries !== undefined && /^[a-f0-9]{64}$/.test(before)) {
+    return legacyRestrictedFingerprint(afterEntries) === before;
+  }
+  return false;
+}
+
+function changedRestrictedPaths(before: string, after: string): string[] {
+  const beforeEntries = parseRestrictedState(before);
+  const afterEntries = parseRestrictedState(after);
+  if (beforeEntries === undefined || afterEntries === undefined) return [];
+  return [...new Set([...beforeEntries.keys(), ...afterEntries.keys()])]
+    .filter((path) => beforeEntries.get(path) !== afterEntries.get(path))
+    .sort();
+}
 
 function nulPaths(buffer: Buffer): string[] {
   return buffer
@@ -145,13 +211,22 @@ export class GitTransactionManager {
     const after = await this.captureGuard();
     const headChanged = before.head !== after.head;
     const indexChanged = before.indexTree !== after.indexTree;
-    const restrictedPathsChanged =
-      before.restrictedFingerprint !== after.restrictedFingerprint;
+    const restrictedPathsChanged = !restrictedStatesMatch(
+      before.restrictedFingerprint,
+      after.restrictedFingerprint,
+    );
+    const restrictedPaths = restrictedPathsChanged
+      ? changedRestrictedPaths(
+          before.restrictedFingerprint,
+          after.restrictedFingerprint,
+        )
+      : [];
     return {
       safe: !headChanged && !indexChanged && !restrictedPathsChanged,
       headChanged,
       indexChanged,
       restrictedPathsChanged,
+      restrictedPaths,
     };
   }
 
@@ -257,14 +332,11 @@ export class GitTransactionManager {
         ...(await this.#scanRestrictedFiles()),
       ]),
     ].sort();
-    const hash = createHash("sha256");
+    const entries: Array<readonly [string, string]> = [];
     for (const path of restricted) {
-      hash.update(path);
-      hash.update("\0");
-      hash.update(await hashPath(this.repoRoot, path));
-      hash.update("\0");
+      entries.push([path, await hashPath(this.repoRoot, path)]);
     }
-    return hash.digest("hex");
+    return serializeRestrictedState(entries);
   }
 
   async #scanRestrictedFiles(): Promise<string[]> {
