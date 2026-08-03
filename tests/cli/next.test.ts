@@ -11,7 +11,13 @@ import {
   resolveNextUpstream,
   withVisualRemote,
 } from "@visual-remote/cli/next";
-import { findAvailablePort } from "@visual-remote/bridge-core";
+import { startAttachBridge } from "@visual-remote/cli/bridge";
+import {
+  acquireWorktreeLock,
+  BridgeAlreadyRunningError,
+  findAvailablePort,
+  readInstance,
+} from "@visual-remote/bridge-core";
 
 const execFileAsync = promisify(execFile);
 
@@ -116,6 +122,79 @@ describe("Visual Remote Next.js integration", () => {
       expect(await client.text()).toContain("__visual");
     } finally {
       await closeVisualRemoteNext(root);
+    }
+  });
+
+  it("reuses a registered Bridge without taking ownership of its lifecycle", async () => {
+    const root = await mkdtemp(join(tmpdir(), "visual-next-reuse-"));
+    await execFileAsync("git", ["init", "--quiet", root]);
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({ name: "visual-next-reuse-fixture", private: true }),
+      "utf8",
+    );
+    await mkdir(join(root, ".visualdev"));
+    await writeFile(
+      join(root, ".visualdev/config.yaml"),
+      "version: 1\nproject:\n  id: next-reuse-fixture\n  workspace: .\ngateway:\n  host: 127.0.0.1\n  port: auto\nupstream:\n  port: auto\n",
+      "utf8",
+    );
+
+    const appPort = await findAvailablePort(33_000 + (process.pid % 1_000), "127.0.0.1");
+    const ownerPort = await findAvailablePort(appPort + 1, "127.0.0.1");
+    const owner = await startAttachBridge(
+      {
+        upstream: `http://127.0.0.1:${appPort}`,
+        host: "127.0.0.1",
+        listen: ownerPort,
+      },
+      { cwd: root, upstreamMonitor: false },
+    );
+
+    try {
+      expect(await readInstance(root)).toMatchObject({
+        gatewayUrl: owner.gatewayUrl,
+        pid: process.pid,
+      });
+
+      const requestedPort = await findAvailablePort(ownerPort + 1, "127.0.0.1");
+      const config = withVisualRemote(
+        {},
+        {
+          cwd: root,
+          appPort,
+          bridgeHost: "127.0.0.1",
+          bridgePort: requestedPort,
+        },
+      );
+      const development = await config("phase-development-server", {
+        defaultConfig: {},
+      });
+      const rewrites = await development.rewrites?.();
+      const groups = rewrites as { beforeFiles: Array<{ destination: string }> };
+
+      expect(groups.beforeFiles[0]?.destination).toBe(
+        `${owner.gatewayUrl}/_visual/:path*`,
+      );
+      expect((await readInstance(root))?.gatewayUrl).toBe(owner.gatewayUrl);
+
+      await closeVisualRemoteNext(root);
+
+      expect((await readInstance(root))?.gatewayUrl).toBe(owner.gatewayUrl);
+      await expect(acquireWorktreeLock(root)).rejects.toBeInstanceOf(
+        BridgeAlreadyRunningError,
+      );
+      const client = await fetch(`${owner.gatewayUrl}/_visual/client.js`);
+      expect(client.status).toBe(200);
+
+      await owner.close();
+
+      expect(await readInstance(root)).toBeUndefined();
+      const lock = await acquireWorktreeLock(root);
+      await lock.release();
+    } finally {
+      await closeVisualRemoteNext(root);
+      await owner.close();
     }
   });
 });

@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  readFileSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+} from "node:fs";
+import {
   mkdir,
   link,
   readFile,
@@ -44,6 +50,7 @@ export interface WorktreeLock {
   runtimeDirectory: string;
   lockPath: string;
   release(): Promise<void>;
+  releaseSync(): void;
 }
 
 export interface RuntimePathOptions {
@@ -86,6 +93,15 @@ export function runtimeRoot(options: RuntimePathOptions = {}): string {
 export async function repositoryKey(repositoryRoot: string): Promise<string> {
   const canonicalRoot = await realpath(repositoryRoot);
   return createHash("sha256").update(canonicalRoot).digest("hex");
+}
+
+function runtimeDirectoryForSync(
+  repositoryRoot: string,
+  options: RuntimePathOptions,
+): string {
+  const canonicalRoot = realpathSync(repositoryRoot);
+  const repoKey = createHash("sha256").update(canonicalRoot).digest("hex");
+  return join(runtimeRoot(options), repoKey);
 }
 
 export async function runtimeDirectoryFor(
@@ -157,6 +173,14 @@ async function readJson(path: string): Promise<unknown | undefined> {
   }
 }
 
+function readJsonSync(path: string): unknown | undefined {
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function readInstance(
   repositoryRoot: string,
   options: RuntimePathOptions = {},
@@ -196,6 +220,22 @@ export async function removeInstance(
     }
   }
   await rm(path, { force: true });
+}
+
+export function removeInstanceSync(
+  repositoryRoot: string,
+  expectedPid?: number,
+  options: RuntimePathOptions = {},
+): void {
+  const directory = runtimeDirectoryForSync(repositoryRoot, options);
+  const path = join(directory, "instance.json");
+  if (expectedPid !== undefined) {
+    const current = readJsonSync(path);
+    if (!isBridgeInstanceRecord(current) || current.pid !== expectedPid) {
+      return;
+    }
+  }
+  rmSync(path, { force: true });
 }
 
 export async function listInstances(
@@ -274,23 +314,48 @@ export async function acquireWorktreeLock(
       }
 
       let released = false;
+      let releasePromise: Promise<void> | undefined;
       return {
         repoKey,
         runtimeDirectory,
         lockPath,
-        async release() {
+        release() {
           if (released) {
+            return Promise.resolve();
+          }
+          releasePromise ??= (async () => {
+            const current = await readJson(lockPath);
+            if (isLockRecord(current) && current.ownerId === ownerId) {
+              await unlink(lockPath).catch((error: NodeJS.ErrnoException) => {
+                if (error.code !== "ENOENT") {
+                  throw error;
+                }
+              });
+            }
+            released = true;
+          })();
+          return releasePromise;
+        },
+        releaseSync() {
+          if (released || releasePromise !== undefined) {
             return;
           }
-          released = true;
-          const current = await readJson(lockPath);
+          const current = readJsonSync(lockPath);
           if (isLockRecord(current) && current.ownerId === ownerId) {
-            await unlink(lockPath).catch((error: NodeJS.ErrnoException) => {
-              if (error.code !== "ENOENT") {
+            try {
+              unlinkSync(lockPath);
+            } catch (error) {
+              if (
+                typeof error !== "object" ||
+                error === null ||
+                !("code" in error) ||
+                error.code !== "ENOENT"
+              ) {
                 throw error;
               }
-            });
+            }
           }
+          released = true;
         },
       };
     } catch (error) {

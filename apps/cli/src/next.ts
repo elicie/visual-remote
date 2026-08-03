@@ -1,4 +1,9 @@
 import { resolve } from "node:path";
+import {
+  BridgeAlreadyRunningError,
+  isProcessAlive,
+  type BridgeInstanceRecord,
+} from "@visual-remote/bridge-core";
 import { startAttachBridge, type RunningBridge } from "./bridge.js";
 
 const DEVELOPMENT_SERVER_PHASE = "phase-development-server";
@@ -39,7 +44,12 @@ export interface VisualRemoteNextOptions {
   appPort?: number;
 }
 
-const runningBridges = new Map<string, Promise<RunningBridge>>();
+interface NextBridgeReference {
+  gatewayUrl: string;
+  ownedBridge?: RunningBridge;
+}
+
+const runningBridges = new Map<string, Promise<NextBridgeReference>>();
 
 function validPort(value: unknown): number | undefined {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -129,24 +139,52 @@ function addRequiredDevOrigin(config: NextConfigLike): NextConfigLike {
   };
 }
 
-function ensureBridge(options: VisualRemoteNextOptions): Promise<RunningBridge> {
+function isLiveBridgeInstance(
+  instance: BridgeInstanceRecord | undefined,
+  repoRoot: string,
+): instance is BridgeInstanceRecord {
+  return (
+    instance !== undefined &&
+    instance.repoRoot === repoRoot &&
+    isProcessAlive(instance.pid)
+  );
+}
+
+async function startOrReuseBridge(
+  options: VisualRemoteNextOptions,
+  cwd: string,
+): Promise<NextBridgeReference> {
+  try {
+    const ownedBridge = await startAttachBridge(
+      {
+        upstream: resolveNextUpstream(options),
+        ...(options.bridgeHost === undefined ? {} : { host: options.bridgeHost }),
+        ...(options.bridgePort === undefined ? {} : { listen: options.bridgePort }),
+      },
+      { cwd },
+    );
+    return { gatewayUrl: ownedBridge.gatewayUrl, ownedBridge };
+  } catch (error) {
+    if (!(error instanceof BridgeAlreadyRunningError)) throw error;
+    if (isLiveBridgeInstance(error.instance, error.repoRoot)) {
+      return { gatewayUrl: error.instance.gatewayUrl };
+    }
+    throw error;
+  }
+}
+
+function ensureBridge(options: VisualRemoteNextOptions): Promise<NextBridgeReference> {
   const cwd = resolve(options.cwd ?? process.cwd());
   const existing = runningBridges.get(cwd);
   if (existing !== undefined) return existing;
 
-  const bridge = startAttachBridge(
-    {
-      upstream: resolveNextUpstream(options),
-      ...(options.bridgeHost === undefined ? {} : { host: options.bridgeHost }),
-      ...(options.bridgePort === undefined ? {} : { listen: options.bridgePort }),
-    },
-    { cwd },
-  );
+  const bridge = startOrReuseBridge(options, cwd);
   runningBridges.set(cwd, bridge);
   void bridge.then(
     (running) => {
-      running.gateway.server.unref();
-      void running.closed.then(() => {
+      if (running.ownedBridge === undefined) return;
+      running.ownedBridge.gateway.server.unref();
+      void running.ownedBridge.closed.then(() => {
         if (runningBridges.get(cwd) === bridge) runningBridges.delete(cwd);
       });
     },
@@ -166,7 +204,7 @@ export async function closeVisualRemoteNext(cwd = process.cwd()): Promise<void> 
   runningBridges.delete(key);
   if (bridge === undefined) return;
   const running = await bridge.catch(() => undefined);
-  await running?.close();
+  await running?.ownedBridge?.close();
 }
 
 /**
