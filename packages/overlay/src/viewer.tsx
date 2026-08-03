@@ -28,6 +28,8 @@ import { viewerStyles } from "./viewer-styles.js";
 
 type TaskFilter = "all" | "active" | "review" | "issue";
 const TASK_PAGE_SIZE = 100;
+const TASK_FETCH_SIZE = TASK_PAGE_SIZE + 1;
+const DIFF_PREVIEW_CHARACTERS = 60_000;
 
 interface DetailState extends TaskArtifacts {
   taskId: string;
@@ -147,6 +149,18 @@ function errorText(error: unknown): string {
   return compactText(message, 180);
 }
 
+function viewerRequestError(error: unknown, fallback: string): string {
+  const message = errorText(error);
+  if (
+    message.includes("unauthorized")
+    || message.includes("401")
+    || message.includes("Invalid viewer token")
+  ) {
+    return "읽기 전용 세션이 만료되었습니다. Overlay의 ‘작업 보드’ 버튼에서 다시 열어주세요.";
+  }
+  return `${fallback} (${message})`;
+}
+
 function unavailableLabel(value: TaskArtifacts["unavailable"][number]): string {
   if (value === "files") return "변경 파일";
   if (value === "logs") return "작업 로그";
@@ -188,6 +202,10 @@ function Viewer() {
   const filterRef = useRef<TaskFilter>("all");
   const queryRef = useRef("");
   const detailAbortRef = useRef<AbortController | null>(null);
+  const dashboardRequestRef = useRef(0);
+  const hydratedRef = useRef(false);
+  const pendingEventsRef = useRef<ServerEvent[]>([]);
+  const connectionStateRef = useRef<ConnectionState>(token ? "connecting" : "unpaired");
   const [projectId, setProjectId] = useState("current");
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [filter, setFilter] = useState<TaskFilter>("all");
@@ -199,6 +217,7 @@ function Viewer() {
   const [hasMore, setHasMore] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
+  const [expandedDiffTaskId, setExpandedDiffTaskId] = useState<string | null>(null);
   const [connection, setConnection] = useState<ConnectionSnapshot>({
     state: token ? "connecting" : "unpaired",
     lastSequence: 0,
@@ -252,7 +271,10 @@ function Viewer() {
             ? {
                 ...current,
                 loading: false,
-                error: `상세 내역을 불러오지 못했습니다. (${errorText(error)})`,
+                error: viewerRequestError(
+                  error,
+                  "상세 내역을 불러오지 못했습니다.",
+                ),
               }
             : current,
         );
@@ -263,97 +285,7 @@ function Viewer() {
     [token],
   );
 
-  const loadDashboard = useCallback(async () => {
-    if (!token) {
-      setLoadError("페어링된 Overlay의 ‘작업 보드’ 버튼에서 다시 열어주세요.");
-      return;
-    }
-
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const [nextTasks, nextProjectId] = await Promise.all([
-        fetchTasks(token, { limit: TASK_PAGE_SIZE }),
-        fetchProjectId(token),
-      ]);
-      const ordered = orderedTasks(nextTasks);
-      tasksRef.current = ordered;
-      setTasks(ordered);
-      setHasMore(nextTasks.length === TASK_PAGE_SIZE);
-      if (nextProjectId) setProjectId(nextProjectId);
-
-      const selected = selectedIdRef.current
-        ? ordered.find((task) => task.id === selectedIdRef.current)
-        : undefined;
-      const nextSelected =
-        selected
-        && matchesFilter(selected, filterRef.current)
-        && matchesQuery(selected, queryRef.current)
-          ? selected
-          : ordered.find(
-              (task) =>
-                matchesFilter(task, filterRef.current)
-                && matchesQuery(task, queryRef.current),
-            ) ?? null;
-      await selectTask(nextSelected);
-      setRefreshedAt(new Date());
-    } catch (error) {
-      setLoadError(
-        `작업 목록을 불러오지 못했습니다. Bridge 연결을 확인해 주세요. (${errorText(
-          error,
-        )})`,
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [selectTask, token]);
-
-  const loadMoreTasks = useCallback(async () => {
-    if (!token || loadingMore) return;
-    const cursor = tasksRef.current.at(-1);
-    if (!cursor) return;
-    setLoadingMore(true);
-    setLoadError(null);
-    try {
-      const page = await fetchTasks(token, {
-        limit: TASK_PAGE_SIZE,
-        cursor: { id: cursor.id, createdAt: cursor.createdAt },
-      });
-      setTasks((current) => {
-        const byId = new Map(current.map((task) => [task.id, task]));
-        for (const task of page) byId.set(task.id, task);
-        const next = orderedTasks([...byId.values()]);
-        tasksRef.current = next;
-        return next;
-      });
-      setHasMore(page.length === TASK_PAGE_SIZE);
-      setRefreshedAt(new Date());
-    } catch (error) {
-      setLoadError(`이전 작업 기록을 불러오지 못했습니다. (${errorText(error)})`);
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [loadingMore, token]);
-
-  useEffect(() => {
-    void loadDashboard();
-  }, [loadDashboard]);
-
-  const filteredTasks = useMemo(
-    () =>
-      tasks.filter(
-        (task) => matchesFilter(task, filter) && matchesQuery(task, query),
-      ),
-    [filter, query, tasks],
-  );
-
-  useEffect(() => {
-    const selected = selectedIdRef.current;
-    if (selected && filteredTasks.some((task) => task.id === selected)) return;
-    void selectTask(filteredTasks[0] ?? null);
-  }, [filteredTasks, selectTask]);
-
-  const handleServerEvent = useCallback(
+  const applyServerEvent = useCallback(
     (event: ServerEvent) => {
       setRefreshedAt(new Date());
       const eventTask = taskFromEvent(event);
@@ -401,21 +333,152 @@ function Viewer() {
     [selectTask],
   );
 
+  const handleServerEvent = useCallback(
+    (event: ServerEvent) => {
+      if (!hydratedRef.current) {
+        pendingEventsRef.current.push(event);
+        return;
+      }
+      applyServerEvent(event);
+    },
+    [applyServerEvent],
+  );
+
+  const loadDashboard = useCallback(async () => {
+    if (!token) {
+      setLoadError("Overlay의 ‘작업 보드’ 버튼에서 다시 열어주세요.");
+      return;
+    }
+
+    const requestId = ++dashboardRequestRef.current;
+    hydratedRef.current = false;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [fetchedTasks, nextProjectId] = await Promise.all([
+        fetchTasks(token, { limit: TASK_FETCH_SIZE }),
+        fetchProjectId(token),
+      ]);
+      if (requestId !== dashboardRequestRef.current) return;
+      const nextTasks = fetchedTasks.slice(0, TASK_PAGE_SIZE);
+      const ordered = orderedTasks(nextTasks);
+      tasksRef.current = ordered;
+      setTasks(ordered);
+      setHasMore(fetchedTasks.length > TASK_PAGE_SIZE);
+      if (nextProjectId) setProjectId(nextProjectId);
+
+      const selected = selectedIdRef.current
+        ? ordered.find((task) => task.id === selectedIdRef.current)
+        : undefined;
+      const nextSelected =
+        selected
+        && matchesFilter(selected, filterRef.current)
+        && matchesQuery(selected, queryRef.current)
+          ? selected
+          : ordered.find(
+              (task) =>
+                matchesFilter(task, filterRef.current)
+                && matchesQuery(task, queryRef.current),
+            ) ?? null;
+      await selectTask(nextSelected);
+      setRefreshedAt(new Date());
+    } catch (error) {
+      if (requestId !== dashboardRequestRef.current) return;
+      setLoadError(viewerRequestError(
+        error,
+        "작업 목록을 불러오지 못했습니다. Bridge 연결을 확인해 주세요.",
+      ));
+    } finally {
+      if (requestId === dashboardRequestRef.current) {
+        hydratedRef.current = true;
+        const pendingEvents = pendingEventsRef.current
+          .splice(0)
+          .sort((left, right) => left.seq - right.seq);
+        for (const event of pendingEvents) applyServerEvent(event);
+        setLoading(false);
+      }
+    }
+  }, [applyServerEvent, selectTask, token]);
+
+  const loadMoreTasks = useCallback(async () => {
+    if (!token || loadingMore) return;
+    const cursor = tasksRef.current.at(-1);
+    if (!cursor) return;
+    setLoadingMore(true);
+    setLoadError(null);
+    try {
+      const fetchedPage = await fetchTasks(token, {
+        limit: TASK_FETCH_SIZE,
+        cursor: { id: cursor.id, createdAt: cursor.createdAt },
+      });
+      const page = fetchedPage.slice(0, TASK_PAGE_SIZE);
+      setTasks((current) => {
+        const byId = new Map(current.map((task) => [task.id, task]));
+        for (const task of page) byId.set(task.id, task);
+        const next = orderedTasks([...byId.values()]);
+        tasksRef.current = next;
+        return next;
+      });
+      setHasMore(fetchedPage.length > TASK_PAGE_SIZE);
+      setRefreshedAt(new Date());
+    } catch (error) {
+      setLoadError(viewerRequestError(
+        error,
+        "이전 작업 기록을 불러오지 못했습니다.",
+      ));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, token]);
+
+  useEffect(() => {
+    void loadDashboard();
+  }, [loadDashboard]);
+
+  const filteredTasks = useMemo(
+    () =>
+      tasks.filter(
+        (task) => matchesFilter(task, filter) && matchesQuery(task, query),
+      ),
+    [filter, query, tasks],
+  );
+
+  useEffect(() => {
+    const selected = selectedIdRef.current;
+    if (selected && filteredTasks.some((task) => task.id === selected)) return;
+    void selectTask(filteredTasks[0] ?? null);
+  }, [filteredTasks, selectTask]);
+
   useEffect(() => {
     if (!token) return;
     const bridge = new BridgeConnection({
       token,
       mode: "viewer",
       browserSessionId: viewerSessionId,
+      onSequenceGap: () => {
+        void loadDashboard();
+      },
       onSnapshot: (snapshot) => {
+        const previousState = connectionStateRef.current;
+        connectionStateRef.current = snapshot.state;
         setConnection(snapshot);
         if (snapshot.projectId) setProjectId(snapshot.projectId);
+        if (snapshot.state === "unauthorized") {
+          setLoadError(
+            "읽기 전용 세션이 만료되었습니다. Overlay의 ‘작업 보드’ 버튼에서 다시 열어주세요.",
+          );
+        } else if (
+          snapshot.state === "connected"
+          && (previousState === "offline" || previousState === "reconnecting")
+        ) {
+          void loadDashboard();
+        }
       },
       onEvent: handleServerEvent,
     });
     bridge.connect();
     return () => bridge.close();
-  }, [handleServerEvent, token, viewerSessionId]);
+  }, [handleServerEvent, loadDashboard, token, viewerSessionId]);
 
   useEffect(
     () => () => {
@@ -431,6 +494,13 @@ function Viewer() {
     selectedDetail && selectedDetail.changedFiles.length > 0
       ? selectedDetail.changedFiles
       : selectedTask?.changedFiles ?? [];
+  const fullDiff = selectedDetail?.diff ?? "";
+  const diffIsLarge = fullDiff.length > DIFF_PREVIEW_CHARACTERS;
+  const diffExpanded = selectedTask?.id === expandedDiffTaskId;
+  const visibleDiff =
+    diffIsLarge && !diffExpanded
+      ? `${fullDiff.slice(0, DIFF_PREVIEW_CHARACTERS)}\n\n… 성능을 위해 나머지 diff를 접었습니다.`
+      : fullDiff;
 
   const counts = useMemo(
     () => ({
@@ -543,7 +613,7 @@ function Viewer() {
                   onInput={(event) => setQuery(event.currentTarget.value)}
                 />
               </label>
-              <span class="machine">최근 {tasks.length}개</span>
+              <span class="machine">불러온 {tasks.length}개 내 검색</span>
             </div>
 
             {loading && tasks.length === 0 ? (
@@ -655,7 +725,12 @@ function Viewer() {
                   </div>
                 </dl>
 
-                <div class="detail-scroll">
+                <div
+                  class="detail-scroll"
+                  role="region"
+                  aria-label="선택한 작업의 변경 내역"
+                  tabIndex={0}
+                >
                   {selectedTask.error?.message
                   || selectedDetail?.error
                   || (selectedDetail && selectedDetail.unavailable.length > 0) ? (
@@ -710,7 +785,7 @@ function Viewer() {
                       {selectedDetail?.loading ? (
                         <p class="block-state">상세 내역을 불러오는 중입니다.</p>
                       ) : selectedDetail && selectedDetail.logs.length > 0 ? (
-                        <ol>
+                        <ol tabIndex={0} aria-label="작업 로그 목록">
                           {selectedDetail.logs.map((log, index) => (
                             <li key={`${index}-${log}`}><span class="machine">{String(index + 1).padStart(2, "0")}</span>{log}</li>
                           ))}
@@ -723,12 +798,30 @@ function Viewer() {
                     <section class="diff-block" aria-labelledby="diff-title">
                       <header>
                         <h3 id="diff-title">Unified diff</h3>
-                        <span class="machine">DIFF</span>
+                        <div class="diff-head-tools">
+                          <span class="machine">
+                            {diffIsLarge && !diffExpanded ? "PREVIEW" : "DIFF"}
+                          </span>
+                          {diffIsLarge ? (
+                            <button
+                              type="button"
+                              class="diff-toggle"
+                              aria-expanded={diffExpanded ? "true" : "false"}
+                              onClick={() => setExpandedDiffTaskId(
+                                diffExpanded ? null : selectedTask.id,
+                              )}
+                            >
+                              {diffExpanded ? "미리보기로 접기" : "전체 diff 펼치기"}
+                            </button>
+                          ) : null}
+                        </div>
                       </header>
                       {selectedDetail?.loading ? (
                         <p class="block-state">Diff를 불러오는 중입니다.</p>
                       ) : selectedDetail?.unavailable.includes("diff") ? null : (
-                        <pre>{selectedDetail?.diff || "저장된 diff가 없습니다."}</pre>
+                        <pre tabIndex={0} aria-label="Unified diff 내용">
+                          {visibleDiff || "저장된 diff가 없습니다."}
+                        </pre>
                       )}
                     </section>
                   </div>

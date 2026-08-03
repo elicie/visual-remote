@@ -49,7 +49,7 @@ MVP에서 채택할 핵심 결정은 다음과 같다.
 | 되돌리기 | 최신 task가 변경한 경로만 pre-task snapshot으로 복원 |
 | 상태 저장 | 사용자 홈의 저장소별 SQLite |
 | 브라우저 확장 | MVP에서 사용하지 않음 |
-| 로그인/팀 권한 | 구현하지 않음. 개인 pairing token만 사용 |
+| 로그인/팀 권한 | 구현하지 않음. 제어 연결은 별도 인증 없이 허용 |
 | 자동 클릭/입력 | MVP에서 제외. 현재 탭은 조회와 검증만 수행 |
 
 ### 2.1 핵심 원칙
@@ -299,15 +299,15 @@ visual dev
 5. 설정된 dev command를 upstream port로 실행한다.
 6. 안정적인 gateway port를 연다.
 7. HTML/HTTP/WebSocket proxy를 시작한다.
-8. pairing URL과 Portr 대상 port를 표시한다.
+8. 브라우저 공개 URL과 Portr 대상 port를 표시한다.
 
 예:
 
 ```text
-Gateway:   http://dev:10001
-Upstream:  http://127.0.0.1:43121
-Public:    https://admin.bridge.example
-Pair URL:  https://admin.bridge.example/#visual-pair=...
+Gateway:  http://dev:10001
+Upstream: http://127.0.0.1:43121
+Public:   https://admin.bridge.example/
+Open:     https://admin.bridge.example/
 ```
 
 ### 5.3 Attach mode
@@ -594,7 +594,7 @@ visual dev
 
 - Bridge와 upstream dev server를 foreground로 실행
 - Ctrl+C 시 자식 process group까지 종료
-- gateway, upstream, public, pairing URL 출력
+- gateway, upstream, public, browser open URL 출력
 - task 로그는 구조화 JSONL과 사람이 읽는 콘솔 형식을 함께 지원
 
 ### 8.3 `visual attach`
@@ -1029,29 +1029,25 @@ interface BrowserSession {
 
 여러 탭이 같은 프로젝트에 연결될 수 있다. task를 생성한 탭이 `originBrowserSessionId`가 되며 HMR/대상 재탐색 검증은 우선 해당 탭에서 수행한다.
 
-### 12.2 Pairing token
+### 12.2 브라우저 연결
 
-로그인 시스템 대신 Bridge 시작마다 임의 token을 만든다.
+Bridge의 공개 주소를 직접 열면 Overlay가 별도 pairing token 없이 제어 채널에
+연결된다.
 
 ```text
-https://admin.bridge.example/#visual-pair=<token>
+https://admin.bridge.example/
 ```
 
 브라우저 동작:
 
-1. URL fragment에서 token을 읽는다.
-2. 해당 origin의 `sessionStorage`에 저장한다.
-3. `history.replaceState`로 fragment를 제거한다.
-4. REST는 `Authorization: Bearer`를 사용한다.
-5. WebSocket 연결 후 첫 메시지로 auth한다.
+1. 공개 주소를 연다.
+2. Overlay가 익명 control WebSocket을 연결한다.
+3. REST 제어 요청은 별도 Authorization header 없이 같은 origin으로 전송한다.
 
-Fragment는 HTTP request에 포함되지 않으므로 Portr나 reverse proxy access log에 남지 않는다.
-
-token이 없는 브라우저에서는 앱 자체는 그대로 보이지만 Overlay 제어 UI는 비활성화한다.
-
-독립 작업 보드는 control token을 직접 전달받지 않는다. 페어링된 Overlay가
-`GET /_visual/api/viewer-session`으로 Bridge 수명에 묶인 별도 viewer token과
-`/_visual/viewer#visual-view=<token>` 주소를 발급받는다. viewer token은 작업 목록,
+독립 작업 보드는 Overlay가
+`GET /_visual/api/viewer-session`으로 호출마다 분리된 단기 viewer token과
+`/_visual/viewer#visual-view=<token>` 주소를 발급받는다. 기본 유효 시간은 30분이며
+Gateway 설정으로 조정할 수 있다. viewer token은 작업 목록,
 상세, 파일, 로그, diff와 읽기 전용 WebSocket 이벤트만 허용하며 task 생성·취소·유지·
 되돌리기 요청은 `403 read_only_token`으로 거부한다.
 
@@ -1141,7 +1137,8 @@ WebSocket은 실시간 event와 command에 사용하고, 큰 artifact는 HTTP로
 | GET | `/_visual/api/artifacts/:id` | screenshot 등 artifact |
 | WS | `/_visual/ws` | 실시간 protocol |
 
-모든 제어 API는 pairing token, Origin allowlist, project ID 확인을 통과해야 한다.
+모든 제어 API는 Origin allowlist와 project ID 확인을 통과해야 한다. control
+요청에는 pairing token을 요구하지 않는다.
 
 ---
 
@@ -1860,7 +1857,7 @@ verify-<task>.log  검증 명령
 
 - `Authorization: Bearer ...`
 - API key 형태
-- pairing token
+- viewer session token
 - cookie header
 - 환경변수 secret allowlist/denylist
 
@@ -1984,7 +1981,7 @@ repo B gateway 4200 / upstream 44200
 - streaming HTML script injection
 - Overlay bundle serving
 - Shadow DOM toolbar
-- pairing token
+- 익명 control WebSocket 연결
 - browser session WebSocket
 
 완료 조건:
@@ -2132,7 +2129,7 @@ MVP release 전에 아래 항목을 모두 확인한다.
 | dirty tree task diff 분리 어려움 | temporary Git index + hidden before/after commit snapshot |
 | agent가 Git 명령을 수행함 | prompt 금지, HEAD/index guard, unsafe 상태 처리 |
 | agent가 repo 밖을 접근함 | path guard + CLI sandbox 설정, 향후 OS sandbox |
-| Portr URL이 외부에 노출됨 | control API pairing token, Origin 검사, Bridge localhost bind |
+| Portr URL이 외부에 노출됨 | 사용자가 승인한 익명 control 운영, Origin 검사, 공개 주소 관리 |
 | 여러 task가 같은 파일을 충돌 수정 | 저장소당 writer 1개와 queue |
 | Overlay가 app 조작을 방해함 | 비활성 시 pointer-events none, Shadow DOM, ignore subtree |
 | screenshot 실패 | best-effort artifact로 취급하고 DOM/source context를 기본으로 사용 |

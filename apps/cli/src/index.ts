@@ -50,7 +50,7 @@ export function createCli(dependencies: CliDependencies = {}): Command {
     .requiredOption("--upstream <url>", "existing development server URL")
     .option("--listen <port>", "gateway port (10001 or above)", parsePort)
     .option("--host <host>", "gateway bind host (default: 0.0.0.0)")
-    .option("--public-url <url>", "public Gateway URL used for the Pair URL")
+    .option("--public-url <url>", "public Gateway URL opened in the browser")
     .action(
       async (options: {
         upstream: string;
@@ -69,7 +69,7 @@ export function createCli(dependencies: CliDependencies = {}): Command {
     .description("Run the configured development server and Bridge")
     .option("--listen <port>", "gateway port (10001 or above)", parsePort)
     .option("--host <host>", "gateway bind host (default: 0.0.0.0)")
-    .option("--public-url <url>", "public Gateway URL used for the Pair URL")
+    .option("--public-url <url>", "public Gateway URL opened in the browser")
     .action(async (options: { listen?: number; host?: string; publicUrl?: string }) => {
       const bridge = await startManagedBridge(options, dependencies);
       output(dependencies, formatBridgeSummary(bridge));
