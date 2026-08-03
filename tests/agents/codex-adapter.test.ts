@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -17,11 +17,15 @@ async function executable(directory: string, source: string): Promise<string> {
   return path;
 }
 
-function input(root: string, environment: Record<string, string> = {}): AgentRunInput {
+function input(
+  root: string,
+  environment: Record<string, string> = {},
+  workspaceRoot = root,
+): AgentRunInput {
   return {
     taskId: "adapter-test",
     repoRoot: root,
-    workspaceRoot: root,
+    workspaceRoot,
     prompt: "edit the requested UI",
     contextBundlePath: resolve(root, "context.json"),
     environment,
@@ -107,6 +111,8 @@ console.log(JSON.stringify({
   it("registers the bounded direct-exec MCP server for each Codex run", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "visual-codex-direct-test-"));
     try {
+      const workspace = resolve(directory, "apps", "web");
+      await mkdir(workspace, { recursive: true });
       const command = await executable(
         directory,
         `
@@ -114,7 +120,7 @@ let body = "";
 for await (const chunk of process.stdin) body += chunk;
 console.log(JSON.stringify({
   type:"item.completed",
-  item:{type:"agent_message",text:JSON.stringify({args:process.argv.slice(2),body})}
+  item:{type:"agent_message",text:JSON.stringify({args:process.argv.slice(2),body,cwd:process.cwd()})}
 }));
 `,
       );
@@ -125,12 +131,17 @@ console.log(JSON.stringify({
         directExecMcpScript: mcpScript,
       });
       const events: NormalizedAgentEvent[] = [];
-      for await (const event of adapter.run(input(directory), new AbortController().signal)) {
+      for await (const event of adapter.run(
+        input(directory, {}, workspace),
+        new AbortController().signal,
+      )) {
         events.push(event);
       }
       const message = events.find((event) => event.type === "message");
       if (message?.type !== "message") throw new Error("Missing direct-exec prompt message");
-      const record = JSON.parse(message.text) as { args: string[]; body: string };
+      const record = JSON.parse(message.text) as { args: string[]; body: string; cwd: string };
+      expect(record.cwd).toBe(workspace);
+      expect(record.args).toContain(workspace);
       expect(record.args).toContain(
         `mcp_servers.visual_remote_exec.command=${JSON.stringify(process.execPath)}`,
       );
@@ -140,7 +151,7 @@ console.log(JSON.stringify({
           "--repo-root",
           directory,
           "--workspace-root",
-          directory,
+          workspace,
           "--no-rtk",
         ])}`,
       );

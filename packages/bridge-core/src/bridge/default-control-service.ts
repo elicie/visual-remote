@@ -1,8 +1,11 @@
 import { CodexAdapter } from "../agents/index.js";
 import { loadVisualDevConfig } from "../config/index.js";
-import { GitTransactionManager } from "../git/index.js";
+import {
+  GitTransactionManager,
+  rebaseWorkspacePatterns,
+} from "../git/index.js";
 import { resolveStoragePaths, SqliteTaskStore } from "../storage/index.js";
-import { isActiveTaskStatus, TaskService } from "../tasks/index.js";
+import { isWorkingTaskStatus, TaskService } from "../tasks/index.js";
 import type { BridgeControlContext } from "./control-context.js";
 import type { ControlService } from "./control-service.js";
 import { createTaskControlService } from "./task-control-service.js";
@@ -21,8 +24,16 @@ export async function createDefaultControlService(
   }
 
   const git = await GitTransactionManager.open(context.repoRoot, {
-    allowed: loaded.config.paths.allowed,
-    denied: loaded.config.paths.denied,
+    allowed: rebaseWorkspacePatterns(
+      context.repoRoot,
+      context.workspaceRoot,
+      loaded.config.paths.allowed,
+    ),
+    denied: rebaseWorkspacePatterns(
+      context.repoRoot,
+      context.workspaceRoot,
+      loaded.config.paths.denied,
+    ),
   });
   const storagePaths = await resolveStoragePaths(context.repoRoot, environment);
   const store = new SqliteTaskStore(storagePaths.databasePath);
@@ -54,9 +65,7 @@ export async function createDefaultControlService(
   const reportRuntimeState = (): void => {
     const activeTask = taskService
       .list()
-      .find(
-        (task) => task.status === "queued" || isActiveTaskStatus(task.status),
-      );
+      .find((task) => isWorkingTaskStatus(task.status));
     context.onRuntimeState?.({
       status: activeTask === undefined ? "idle" : "working",
       ...(activeTask === undefined ? {} : { activeTaskId: activeTask.id }),

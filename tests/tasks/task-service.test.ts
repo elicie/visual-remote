@@ -122,7 +122,8 @@ describe("TaskService", () => {
     expect(prompt).toContain(`Workspace: ${fixture.root}`);
     expect(prompt).toContain("Browser URL: http://dev:10001/");
     expect(prompt).toContain("Local upstream URL: http://127.0.0.1:10010/");
-    expect(prompt).toContain("already-resolved target");
+    expect(prompt).toContain("already-resolved service directory");
+    expect(prompt).toContain("Run project commands from the workspace");
     expect(prompt).toContain("Direct browser or Parlane MCP control is not exposed");
     expect(prompt).toContain("Bridge performs its configured HMR and browser checks");
     await service.close();

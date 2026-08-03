@@ -41,6 +41,8 @@ export interface BrowserVerificationBaseline {
   browserSessionId: string;
   renderRevision: number;
   startedAt: string;
+  url: string;
+  knownErrorSignatures: string[];
 }
 
 export interface BrowserVerificationResult {
@@ -49,6 +51,24 @@ export interface BrowserVerificationResult {
   newErrors: BrowserConsoleEvent[];
   targetResult?: BrowserTargetResult;
   summary: string;
+}
+
+function errorSignature(event: BrowserConsoleEvent): string {
+  return `${event.level}\u0000${event.message}`;
+}
+
+function samePage(left: string, right: string): boolean {
+  try {
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right);
+    return (
+      leftUrl.origin === rightUrl.origin
+      && leftUrl.pathname === rightUrl.pathname
+      && leftUrl.search === rightUrl.search
+    );
+  } catch {
+    return left === right;
+  }
 }
 
 export class BrowserSessionManager {
@@ -141,6 +161,14 @@ export class BrowserSessionManager {
       browserSessionId: id,
       renderRevision: session.renderRevision,
       startedAt: now.toISOString(),
+      url: session.url,
+      knownErrorSignatures: [
+        ...new Set(
+          session.consoleEvents
+            .filter((event) => event.level === "error" || event.level === "unhandled")
+            .map(errorSignature),
+        ),
+      ],
     };
   }
 
@@ -158,12 +186,21 @@ export class BrowserSessionManager {
       };
     }
 
-    const newErrors = session.consoleEvents.filter(
-      (event) =>
-        event.createdAt >= baseline.startedAt
-        && (event.level === "error" || event.level === "unhandled"),
-    );
+    const knownErrors = new Set(baseline.knownErrorSignatures);
+    const newErrors = [
+      ...new Map(
+        session.consoleEvents
+          .filter(
+            (event) =>
+              event.createdAt > baseline.startedAt
+              && (event.level === "error" || event.level === "unhandled")
+              && !knownErrors.has(errorSignature(event)),
+          )
+          .map((event) => [errorSignature(event), event]),
+      ).values(),
+    ];
     const renderChanged = session.renderRevision > baseline.renderRevision;
+    const pageUnchanged = samePage(baseline.url, session.url);
     const targetResult =
       options.taskId === undefined
         ? undefined
@@ -182,6 +219,15 @@ export class BrowserSessionManager {
         newErrors,
         ...(targetResult ? { targetResult } : {}),
         summary: `${newErrors.length} new browser error${newErrors.length === 1 ? "" : "s"} detected.`,
+      };
+    }
+    if (!pageUnchanged) {
+      return {
+        status: "partial",
+        renderChanged,
+        newErrors: [],
+        ...(targetResult ? { targetResult } : {}),
+        summary: "Origin browser navigated to a different page during verification.",
       };
     }
     if (options.targetEvidenceRequired) {

@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { createLogger, createServer, type Plugin } from "vite";
+import { startAttachBridge } from "@visual-remote/cli/bridge";
 import { visualRemote } from "@visual-remote/cli/vite";
-import { findAvailablePort } from "@visual-remote/bridge-core";
+import { findAvailablePort, readInstance } from "@visual-remote/bridge-core";
 
 const execFileAsync = promisify(execFile);
 
@@ -82,5 +83,77 @@ describe("Visual Remote Vite integration", () => {
     } finally {
       await server.close();
     }
+  });
+
+  it("reuses a registered Bridge without taking ownership of its lifecycle", async () => {
+    const root = await mkdtemp(join(tmpdir(), "visual-vite-reuse-"));
+    await execFileAsync("git", ["init", "--quiet", root]);
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({ name: "visual-vite-reuse-fixture", private: true }),
+      "utf8",
+    );
+    await writeFile(
+      join(root, "index.html"),
+      "<!doctype html><html><body>reuse fixture</body></html>",
+      "utf8",
+    );
+    await mkdir(join(root, ".visualdev"));
+    await writeFile(
+      join(root, ".visualdev/config.yaml"),
+      "version: 1\nproject:\n  id: vite-reuse-fixture\n  workspace: .\ngateway:\n  host: 127.0.0.1\n  port: auto\nupstream:\n  port: auto\n",
+      "utf8",
+    );
+
+    const appPort = await findAvailablePort(
+      32_000 + (process.pid % 1_000),
+      "127.0.0.1",
+    );
+    const ownerPort = await findAvailablePort(appPort + 1, "127.0.0.1");
+    const owner = await startAttachBridge(
+      {
+        upstream: `http://127.0.0.1:${appPort}`,
+        host: "127.0.0.1",
+        listen: ownerPort,
+      },
+      { cwd: root, upstreamMonitor: false },
+    );
+    const server = await createServer({
+      root,
+      configFile: false,
+      customLogger: createLogger("silent"),
+      server: {
+        host: "127.0.0.1",
+        port: appPort,
+        strictPort: true,
+      },
+      plugins: [
+        visualRemote({
+          cwd: root,
+          bridgeHost: "127.0.0.1",
+          bridgePort: await findAvailablePort(ownerPort + 1, "127.0.0.1"),
+        }),
+      ],
+    });
+    let serverClosed = false;
+
+    try {
+      await server.listen();
+      expect(await responseStatus(`http://127.0.0.1:${appPort}/_visual/client.js`)).toBe(
+        200,
+      );
+      expect((await readInstance(root))?.gatewayUrl).toBe(owner.gatewayUrl);
+
+      await server.close();
+      serverClosed = true;
+
+      expect((await readInstance(root))?.gatewayUrl).toBe(owner.gatewayUrl);
+      expect(await responseStatus(`${owner.gatewayUrl}/_visual/client.js`)).toBe(200);
+    } finally {
+      if (!serverClosed) await server.close();
+      await owner.close();
+    }
+
+    expect(await readInstance(root)).toBeUndefined();
   });
 });

@@ -2,12 +2,18 @@ import { spawn } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
+import {
+  installEmergencyChildExitHook,
+  terminateChildProcessTree,
+} from "../runtime/managed-process.js";
+
 const MAX_COMMANDS = 8;
 const MAX_ARGUMENTS = 64;
 const MAX_ARGUMENT_LENGTH = 4_096;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_OUTPUT_BYTES = 64 * 1_024;
+const KILL_GRACE_MS = 250;
 
 const READ_ONLY_GIT_COMMANDS = new Set([
   "describe",
@@ -50,6 +56,7 @@ const SAFE_RTK_COMMANDS = new Set([
 ]);
 const FORBIDDEN_GIT_OPTIONS = [
   "-C",
+  "-O",
   "-c",
   "--config-env",
   "--ext-diff",
@@ -59,20 +66,46 @@ const FORBIDDEN_GIT_OPTIONS = [
   "--no-index",
   "--open-files-in-pager",
   "--output",
+  "--pathspec-from-file",
   "--show-signature",
   "--textconv",
   "--work-tree",
 ];
-const FORBIDDEN_FIND_ACTIONS = [
-  "-delete",
-  "-exec",
-  "-execdir",
-  "-fls",
-  "-fprint",
-  "-fprintf",
-  "-ok",
-  "-okdir",
-];
+const SAFE_FIND_FLAGS = new Set([
+  "-empty",
+  "-false",
+  "-mount",
+  "-print",
+  "-print0",
+  "-prune",
+  "-quit",
+  "-readable",
+  "-true",
+  "-xdev",
+]);
+const SAFE_FIND_VALUE_FLAGS = new Set([
+  "-iname",
+  "-ipath",
+  "-maxdepth",
+  "-mindepth",
+  "-mmin",
+  "-mtime",
+  "-name",
+  "-path",
+  "-size",
+  "-type",
+]);
+const SAFE_FIND_OPERATORS = new Set([
+  "!",
+  "(",
+  ")",
+  ",",
+  "-a",
+  "-and",
+  "-not",
+  "-o",
+  "-or",
+]);
 
 export interface DirectExecCommand {
   argv: string[];
@@ -107,6 +140,7 @@ export interface DirectExecOptions {
   repoRoot: string;
   workspaceRoot: string;
   rtkExecutable?: string | false;
+  rtkAvailable?: boolean;
   environment?: NodeJS.ProcessEnv;
   maxOutputBytes?: number;
 }
@@ -129,7 +163,21 @@ function isWithin(root: string, candidate: string): boolean {
 function directFileTargets(argv: readonly string[]): string[] {
   const [program, ...arguments_] = argv;
   if (program === "cat" || program === "wc") {
-    return arguments_.filter((argument) => !argument.startsWith("-") && argument !== "-");
+    const targets: string[] = [];
+    let positionalOnly = false;
+    for (const argument of arguments_) {
+      if (argument === "--" && !positionalOnly) {
+        positionalOnly = true;
+        continue;
+      }
+      if (argument === "-") continue;
+      if (positionalOnly || !argument.startsWith("-")) targets.push(argument);
+    }
+    return targets;
+  }
+  if (program === "find") return findPathTargets(arguments_);
+  if (program === "rtk" && arguments_[0] === "find") {
+    return findPathTargets(arguments_.slice(1));
   }
   if (program !== "rtk" || !["read", "wc"].includes(arguments_[0] ?? "")) return [];
   const subcommand = arguments_[0];
@@ -137,13 +185,29 @@ function directFileTargets(argv: readonly string[]): string[] {
     ? new Set(["-l", "--level", "-m", "--max-lines", "--tail-lines"])
     : new Set<string>();
   const targets: string[] = [];
+  let positionalOnly = false;
   for (let index = 1; index < arguments_.length; index += 1) {
     const argument = arguments_[index] ?? "";
+    if (argument === "--" && !positionalOnly) {
+      positionalOnly = true;
+      continue;
+    }
     if (values.has(argument)) {
       index += 1;
       continue;
     }
-    if (!argument.startsWith("-") && argument !== "-") targets.push(argument);
+    if (argument !== "-" && (positionalOnly || !argument.startsWith("-"))) {
+      targets.push(argument);
+    }
+  }
+  return targets;
+}
+
+function findPathTargets(arguments_: readonly string[]): string[] {
+  const targets: string[] = [];
+  for (const argument of arguments_) {
+    if (argument.startsWith("-") || SAFE_FIND_OPERATORS.has(argument)) break;
+    targets.push(argument);
   }
   return targets;
 }
@@ -170,8 +234,45 @@ async function validateDirectFileTargets(
   }
 }
 
+async function validateExistingArgumentPaths(
+  argv: readonly string[],
+  cwd: string,
+  repoRoot: string,
+): Promise<void> {
+  for (const argument of argv.slice(1)) {
+    const candidates = [argument];
+    const equalsIndex = argument.indexOf("=");
+    if (equalsIndex > 0 && equalsIndex < argument.length - 1) {
+      candidates.push(argument.slice(equalsIndex + 1));
+    }
+    for (const candidate of candidates) {
+      if (!candidate || candidate === "-" || candidate === "--") continue;
+      try {
+        const resolved = await realpath(resolve(cwd, candidate));
+        if (!isWithin(repoRoot, resolved)) {
+          throw new DirectExecPolicyError(
+            `Command arguments cannot follow a path outside the registered worktree: ${candidate}`,
+          );
+        }
+      } catch (error) {
+        if (error instanceof DirectExecPolicyError) throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "EINVAL") throw error;
+      }
+    }
+  }
+}
+
 function optionMatches(argument: string, option: string): boolean {
-  return argument === option || argument.startsWith(`${option}=`);
+  return (
+    argument === option
+    || argument.startsWith(`${option}=`)
+    || (
+      /^-[^-]$/u.test(option)
+      && argument.length > option.length
+      && argument.startsWith(option)
+    )
+  );
 }
 
 function validateArguments(arguments_: readonly string[]): void {
@@ -204,12 +305,29 @@ function validateGit(arguments_: readonly string[]): void {
 }
 
 function validateFind(arguments_: readonly string[]): void {
-  if (arguments_.some((argument) =>
-    FORBIDDEN_FIND_ACTIONS.some((action) => optionMatches(argument, action)))) {
-    throw new DirectExecPolicyError("Mutating or executable find actions are not allowed");
-  }
-  if (arguments_.some((argument) => ["-H", "-L"].includes(argument))) {
-    throw new DirectExecPolicyError("Following find symlinks is not allowed");
+  let index = findPathTargets(arguments_).length;
+  while (index < arguments_.length) {
+    const argument = arguments_[index] ?? "";
+    if (SAFE_FIND_OPERATORS.has(argument) || SAFE_FIND_FLAGS.has(argument)) {
+      index += 1;
+      continue;
+    }
+    if (!SAFE_FIND_VALUE_FLAGS.has(argument)) {
+      throw new DirectExecPolicyError(
+        `find option or action is not allowed in direct inspection mode: ${argument || "<empty>"}`,
+      );
+    }
+    const value = arguments_[index + 1];
+    if (value === undefined) {
+      throw new DirectExecPolicyError(`${argument} requires a value`);
+    }
+    if (["-maxdepth", "-mindepth"].includes(argument) && !/^\d+$/u.test(value)) {
+      throw new DirectExecPolicyError(`${argument} requires a non-negative integer`);
+    }
+    if (argument === "-type" && !/^[bcdpflsD]$/u.test(value)) {
+      throw new DirectExecPolicyError("find -type requires one supported file type");
+    }
+    index += 2;
   }
 }
 
@@ -228,8 +346,11 @@ function validateLs(arguments_: readonly string[]): void {
 
 function validateRg(arguments_: readonly string[]): void {
   if (arguments_.some((argument) =>
-    ["-L", "--follow", "--pre", "--pre-glob"].some((option) => optionMatches(argument, option)))) {
-    throw new DirectExecPolicyError("rg preprocessors and symlink traversal are not allowed");
+    ["-f", "-L", "--file", "--follow", "--ignore-file", "--pre", "--pre-glob"]
+      .some((option) => optionMatches(argument, option)))) {
+    throw new DirectExecPolicyError(
+      "rg file inputs, preprocessors, and symlink traversal are not allowed",
+    );
   }
 }
 
@@ -283,7 +404,7 @@ export function validateDirectExecArgv(argv: readonly string[]): void {
   if (program === "wc") validateWc(arguments_);
 }
 
-async function executableAvailable(
+export async function directExecExecutableAvailable(
   executable: string,
   environment: NodeJS.ProcessEnv,
 ): Promise<boolean> {
@@ -382,19 +503,24 @@ async function runCommand(
     const child = spawn(program, arguments_, {
       cwd,
       env: commandEnvironment,
+      detached: process.platform !== "win32",
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
+    const removeEmergencyExitHook = installEmergencyChildExitHook(child);
     let stdout = "";
     let stderr = "";
     let truncated = false;
     let timedOut = false;
     let settled = false;
+    let termination: Promise<void> | undefined;
+    let timer: NodeJS.Timeout | undefined;
     const finish = (exitCode: number): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
+      removeEmergencyExitHook();
       resolveResult({
         argv,
         cwd,
@@ -421,10 +547,22 @@ async function runCommand(
       stderr = error.message;
       finish(127);
     });
-    child.once("close", (code) => finish(code ?? (timedOut ? 124 : 1)));
-    const timer = setTimeout(() => {
+    child.once("close", (code) => {
+      if (termination === undefined) {
+        finish(code ?? (timedOut ? 124 : 1));
+        return;
+      }
+      void termination.finally(() => finish(timedOut ? 124 : (code ?? 1)));
+    });
+    timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      termination ??= terminateChildProcessTree(child, KILL_GRACE_MS);
+      void termination
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          stderr = stderr ? `${stderr}\n${message}` : message;
+        })
+        .finally(() => finish(124));
     }, timeoutMs);
     timer.unref();
   });
@@ -454,9 +592,9 @@ export async function executeReadOnlyBatch(
   const rtkExecutable = options.rtkExecutable === false
     ? undefined
     : options.rtkExecutable ?? "rtk";
-  const rtkAvailable = rtkExecutable === undefined
+  const rtkAvailable = options.rtkAvailable ?? (rtkExecutable === undefined
     ? false
-    : await executableAvailable(rtkExecutable, environment);
+    : await directExecExecutableAvailable(rtkExecutable, environment));
   const results: DirectExecCommandResult[] = [];
   let stoppedEarly = false;
 
@@ -475,6 +613,7 @@ export async function executeReadOnlyBatch(
       throw new DirectExecPolicyError("Command cwd must stay inside the registered worktree");
     }
     await validateDirectFileTargets(command.argv, cwd, repoRoot);
+    await validateExistingArgumentPaths(command.argv, cwd, repoRoot);
 
     let effectiveArgv = [...command.argv];
     let usedRtk = effectiveArgv[0] === "rtk";

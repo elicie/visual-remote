@@ -78,6 +78,25 @@ function isWithin(root: string, candidate: string): boolean {
   return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
 }
 
+export function rebaseWorkspacePatterns(
+  repoRoot: string,
+  workspaceRoot: string,
+  patterns: readonly string[],
+): string[] {
+  const repository = resolve(repoRoot);
+  const workspace = resolve(workspaceRoot);
+  if (!isWithin(repository, workspace)) {
+    throw new PathSafetyError(
+      "PATH_OUTSIDE_REPOSITORY",
+      workspaceRoot,
+      `Workspace is outside the repository: ${workspaceRoot}`,
+    );
+  }
+  const prefix = repositoryRelative(repository, workspace);
+  if (!prefix) return [...patterns];
+  return patterns.map((pattern) => normalizeSlashes(`${prefix}/${pattern}`));
+}
+
 export class PathPolicy {
   readonly repoRoot: string;
   readonly allowedPatterns: readonly string[];

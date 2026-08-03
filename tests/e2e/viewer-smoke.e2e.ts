@@ -177,11 +177,11 @@ test("standalone viewer covers bootstrap, live review, read-only access, and mob
   context.on("page", collectBrowserErrors);
 
   await page.goto(`${fixture.origin}/#visual-pair=${controlToken}`);
-  await page.keyboard.press("Control+Shift+G");
 
   const visualToolbar = page.getByRole("navigation", {
     name: "Visual Bridge 도구",
   });
+  await expect(visualToolbar).toBeVisible();
   await visualToolbar.getByRole("button", { name: "영역" }).click();
   const fixtureMain = await page.locator("main").boundingBox();
   expect(fixtureMain).not.toBeNull();

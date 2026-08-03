@@ -19,6 +19,10 @@ export function isActiveTaskStatus(status: TaskStatus): boolean {
   return status !== "queued" && status !== "review" && !TERMINAL.has(status);
 }
 
+export function isWorkingTaskStatus(status: TaskStatus): boolean {
+  return status === "queued" || isActiveTaskStatus(status);
+}
+
 export function isTerminalTaskStatus(status: TaskStatus): boolean {
   return TERMINAL.has(status);
 }

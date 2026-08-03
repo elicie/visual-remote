@@ -193,7 +193,7 @@ export class CodexAdapter implements AgentAdapter {
       "-s",
       "workspace-write",
       "-C",
-      input.repoRoot,
+      input.workspaceRoot,
       ...this.#directExecConfig(input),
       "-",
     ];
@@ -215,7 +215,7 @@ export class CodexAdapter implements AgentAdapter {
       "-s",
       "workspace-write",
       "-C",
-      input.repoRoot,
+      input.workspaceRoot,
       ...this.#directExecConfig(input),
       "resume",
       input.sessionId,
@@ -233,7 +233,7 @@ export class CodexAdapter implements AgentAdapter {
     const environment = processEnv(input.environment);
     const prompt = await this.#runtimePrompt(input, environment);
     const child = spawn(this.#executable, args, {
-      cwd: input.repoRoot,
+      cwd: input.workspaceRoot,
       env: environment,
       detached: process.platform !== "win32",
       shell: false,
@@ -268,7 +268,7 @@ export class CodexAdapter implements AgentAdapter {
 
     child.stdout.on("data", (chunk: Buffer | string) => {
       stdoutRemainder = splitLines(chunk, stdoutRemainder, (line) => {
-        for (const event of parseCodexJsonLine(line, input.repoRoot)) queue.push(event);
+        for (const event of parseCodexJsonLine(line, input.workspaceRoot)) queue.push(event);
       });
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
@@ -283,7 +283,7 @@ export class CodexAdapter implements AgentAdapter {
       void (async () => {
         await requestTermination();
         if (stdoutRemainder.trim()) {
-          for (const event of parseCodexJsonLine(stdoutRemainder, input.repoRoot)) {
+          for (const event of parseCodexJsonLine(stdoutRemainder, input.workspaceRoot)) {
             queue.push(event);
           }
         }

@@ -526,12 +526,21 @@ function unwrapShellCommand(command: string): string {
 function commandLogLine(event: Record<string, unknown>): string | null {
   if (typeof event.command !== "string") return null;
   const command = unwrapShellCommand(event.command);
-  const runtime = /^rtk(?:\s|$)/u.test(command) ? "RTK" : "명령";
+  const runtime = event.usedRtk === true || /^rtk(?:\s|$)/u.test(command) ? "RTK" : "명령";
   const cwd =
     typeof event.cwd === "string"
       ? event.cwd.split(/[\\/]/u).filter(Boolean).at(-1)
       : undefined;
-  return compactText(`${runtime} · ${command}${cwd ? ` · ${cwd}` : ""}`, 500);
+  const metadata = [
+    cwd,
+    typeof event.durationMs === "number" ? `${event.durationMs}ms` : undefined,
+    event.timedOut === true ? "시간 초과" : undefined,
+    event.truncated === true ? "출력 축약" : undefined,
+  ].filter((value): value is string => Boolean(value));
+  return compactText(
+    `${runtime} · ${command}${metadata.length > 0 ? ` · ${metadata.join(" · ")}` : ""}`,
+    500,
+  );
 }
 
 function logLineFromValue(value: unknown): string | null {
@@ -568,6 +577,20 @@ function logLineFromValue(value: unknown): string | null {
   }
   if (type === "file_hint" && typeof event.path === "string") {
     return compactText(`파일 · ${event.path}`, 500);
+  }
+  if (
+    type === "usage"
+    && typeof event.inputTokens === "number"
+    && typeof event.outputTokens === "number"
+  ) {
+    return compactText(
+      `토큰 · 입력 ${event.inputTokens.toLocaleString("en-US")}${
+        typeof event.cachedInputTokens === "number"
+          ? ` · 캐시 ${event.cachedInputTokens.toLocaleString("en-US")}`
+          : ""
+      } · 출력 ${event.outputTokens.toLocaleString("en-US")}`,
+      500,
+    );
   }
   const message =
     event.message ??

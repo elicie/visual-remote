@@ -14,7 +14,11 @@ import {
   type ControlService,
 } from "./control-service.js";
 import type { BridgeMode } from "./control-context.js";
-import { TaskService, TaskServiceError } from "../tasks/index.js";
+import {
+  isWorkingTaskStatus,
+  TaskService,
+  TaskServiceError,
+} from "../tasks/index.js";
 import {
   BrowserSessionManager,
   type BrowserConsoleEvent,
@@ -644,7 +648,7 @@ export function createTaskControlService(
       activeTask:
         taskService
           .list()
-          .find((task) => !["accepted", "reverted", "failed", "canceled", "unsafe"].includes(task.status))
+          .find((task) => isWorkingTaskStatus(task.status))
           ?.id ?? null,
     }),
     project: () => ({

@@ -1,5 +1,9 @@
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
   DirectExecPolicyError,
+  directExecExecutableAvailable,
   executeReadOnlyBatch,
   type DirectExecBatchRequest,
   type DirectExecBatchResult,
@@ -14,10 +18,11 @@ interface RpcRequest {
   params?: unknown;
 }
 
-interface ServerOptions {
+export interface ServerOptions {
   repoRoot: string;
   workspaceRoot: string;
   rtkExecutable: string | false;
+  rtkAvailable: boolean;
 }
 
 const TOOL_NAME = "run_readonly";
@@ -28,7 +33,9 @@ function recordOf(value: unknown): JsonRecord | undefined {
     : undefined;
 }
 
-function parseArguments(argv: readonly string[]): ServerOptions {
+export function parseArguments(
+  argv: readonly string[],
+): Omit<ServerOptions, "rtkAvailable"> {
   const values = new Map<string, string>();
   let disableRtk = false;
   for (let index = 0; index < argv.length; index += 1) {
@@ -59,7 +66,7 @@ function parseArguments(argv: readonly string[]): ServerOptions {
   };
 }
 
-function parseBatchRequest(value: unknown): DirectExecBatchRequest {
+export function parseBatchRequest(value: unknown): DirectExecBatchRequest {
   const record = recordOf(value);
   const commands = Array.isArray(record?.commands) ? record.commands : undefined;
   if (commands === undefined) {
@@ -91,7 +98,7 @@ function displayArgument(argument: string): string {
     : JSON.stringify(argument);
 }
 
-function formatBatchResult(batch: DirectExecBatchResult): string {
+export function formatBatchResult(batch: DirectExecBatchResult): string {
   const sections = batch.results.map((result) => {
     const metadata = [
       `cwd=${result.cwd}`,
@@ -113,6 +120,21 @@ function formatBatchResult(batch: DirectExecBatchResult): string {
   });
   if (batch.stoppedEarly) sections.push("Batch stopped after the first failed command.");
   return sections.join("\n\n");
+}
+
+export function structuredBatchResult(batch: DirectExecBatchResult): unknown {
+  return {
+    stoppedEarly: batch.stoppedEarly,
+    results: batch.results.map(({ stdout: _stdout, stderr: _stderr, ...metadata }) => metadata),
+  };
+}
+
+export function directExecToolResult(batch: DirectExecBatchResult): unknown {
+  return {
+    content: [{ type: "text", text: formatBatchResult(batch) }],
+    structuredContent: structuredBatchResult(batch),
+    isError: batch.results.some((command) => command.exitCode !== 0),
+  };
 }
 
 function send(message: unknown): void {
@@ -207,11 +229,7 @@ async function handleRequest(request: RpcRequest, options: ServerOptions): Promi
         parseBatchRequest(params.arguments),
         options,
       );
-      result(request.id, {
-        content: [{ type: "text", text: formatBatchResult(batch) }],
-        structuredContent: batch,
-        isError: batch.results.some((command) => command.exitCode !== 0),
-      });
+      result(request.id, directExecToolResult(batch));
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       result(request.id, {
@@ -225,7 +243,14 @@ async function handleRequest(request: RpcRequest, options: ServerOptions): Promi
 }
 
 async function main(): Promise<void> {
-  const options = parseArguments(process.argv.slice(2));
+  const parsed = parseArguments(process.argv.slice(2));
+  const options: ServerOptions = {
+    ...parsed,
+    rtkAvailable:
+      parsed.rtkExecutable === false
+        ? false
+        : await directExecExecutableAvailable(parsed.rtkExecutable, process.env),
+  };
   process.stdin.setEncoding("utf8");
   let remainder = "";
   process.stdin.on("data", (chunk: string) => {
@@ -253,9 +278,14 @@ async function main(): Promise<void> {
   });
 }
 
-void main().catch((caught: unknown) => {
-  process.stderr.write(
-    `${caught instanceof Error ? caught.message : String(caught)}\n`,
-  );
-  process.exitCode = 1;
-});
+if (
+  process.argv[1] !== undefined
+  && fileURLToPath(import.meta.url) === resolve(process.argv[1])
+) {
+  void main().catch((caught: unknown) => {
+    process.stderr.write(
+      `${caught instanceof Error ? caught.message : String(caught)}\n`,
+    );
+    process.exitCode = 1;
+  });
+}

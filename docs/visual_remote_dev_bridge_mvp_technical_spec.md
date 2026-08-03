@@ -561,6 +561,8 @@ security:
 
 - 저장소 루트는 config에서 임의 지정하지 않고 Git으로 탐지한다.
 - `workspace`는 모노레포 내부 앱의 기준 디렉터리다.
+- `paths.allowed`와 `paths.denied`는 workspace 기준이며 Bridge가 Git worktree 상대
+  경로로 정규화한다.
 - `command`는 shell 문자열이 아니라 executable/argv 배열로 저장한다.
 - `{upstreamPort}` 같은 placeholder만 허용한다.
 - denied path가 allowed path보다 항상 우선한다.
@@ -639,6 +641,11 @@ $XDG_RUNTIME_DIR/visual-bridge/<repoKey>/instance.json
 ```
 
 `visual list`는 registry와 PID 생존 여부를 확인해 오래된 항목을 정리한다.
+
+동일 worktree의 살아 있는 instance가 registry에 있으면 프레임워크 통합은 새
+Bridge를 시작하지 않고 해당 `gatewayUrl`을 재사용한다. lock 소유 프로세스만
+Bridge와 registry를 종료할 수 있으며, Vite/Next 설정을 평가한 비소유 프로세스는
+자신이 시작하지 않은 Bridge의 lifecycle을 건드리지 않는다.
 
 ---
 
@@ -1259,6 +1266,10 @@ CLI별 option이나 JSON output 형식은 빠르게 바뀔 수 있으므로 Brid
 - 종료 code와 실패 원인 정규화
 - 등록 worktree 안의 읽기 전용 탐색은 임시 MCP 도구의 `argv` 배치로 직접 실행
 - 지원 명령은 RTK로 자동 변환하고, 셸 문법·변경 명령은 agent sandbox로 fallback
+- 직접 실행 명령은 명령별 허용 문법과 canonical path 검사를 통과해야 하며 timeout은
+  전체 child process group을 종료한다.
+- RTK availability는 MCP server 시작 시 한 번 확인하고 command duration, RTK 사용,
+  truncation과 Codex token usage를 normalized event로 기록한다.
 
 ### 15.3 NormalizedAgentEvent
 
@@ -1268,7 +1279,8 @@ type NormalizedAgentEvent =
   | { type: "phase"; name: string }
   | { type: "tool_start"; name: string; summary?: string }
   | { type: "tool_end"; name: string; ok: boolean }
-  | { type: "command"; command: string; cwd: string }
+  | { type: "command"; command: string; cwd: string; durationMs?: number; usedRtk?: boolean; truncated?: boolean }
+  | { type: "usage"; inputTokens: number; outputTokens: number; cachedInputTokens?: number }
   | { type: "file_hint"; path: string }
   | { type: "session"; sessionId: string }
   | { type: "warning"; text: string }
@@ -1494,7 +1506,8 @@ Bridge는 task 시작 revision과 task 완료 후 revision을 비교한다.
 6. DOM parent path + sibling index
 7. text hash + 주변 element 관계
 
-HMR 후 동일 target을 찾으면 computed style, rect, text, source를 다시 수집한다.
+HMR 후 동일 target을 찾으면 computed style, text와 source를 다시 수집한다. viewport
+스크롤에 따라 달라지는 rect의 x/y 좌표만으로는 변경 성공으로 판정하지 않는다.
 
 결과:
 
@@ -1515,7 +1528,10 @@ Overlay는 개발 모드에서 다음을 가볍게 감싼다.
 - `window.error`
 - `unhandledrejection`
 
-원본 console 동작은 유지한다. task 시작 시 timestamp를 기록하고 task 이후 새 오류만 검증 결과에 포함한다.
+원본 console 동작은 유지한다. task 시작 시 timestamp와 기존 오류 fingerprint를
+기록하고, 이후 처음 등장한 오류만 검증 결과에 포함한다. 같은 기존 개발 환경 오류가
+반복되거나 origin browser가 다른 route로 이동한 경우에는 이번 변경의 성공/실패로
+단정하지 않고 partial로 처리한다.
 
 수집하지 않는 것:
 

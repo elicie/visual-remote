@@ -74,7 +74,16 @@ function directExecSummary(item: JsonRecord): string | undefined {
 function directExecResults(
   item: JsonRecord,
   defaultCwd: string,
-): Array<{ command: string; cwd: string; ok: boolean }> {
+): Array<{
+  command: string;
+  cwd: string;
+  ok: boolean;
+  exitCode?: number;
+  durationMs?: number;
+  usedRtk?: boolean;
+  timedOut?: boolean;
+  truncated?: boolean;
+}> {
   const result = asRecord(item.result);
   const structured = asRecord(result?.structured_content ?? result?.structuredContent);
   const results = Array.isArray(structured?.results) ? structured.results : [];
@@ -82,12 +91,37 @@ function directExecResults(
     const command = asRecord(candidate);
     const argv = stringArray(command?.argv);
     if (argv === undefined) return [];
+    const exitCode = typeof command?.exitCode === "number" ? command.exitCode : undefined;
+    const durationMs = typeof command?.durationMs === "number" ? command.durationMs : undefined;
     return [{
       command: formatArgv(argv),
       cwd: asText(command?.cwd) ?? defaultCwd,
-      ok: command?.exitCode === 0,
+      ok: exitCode === 0,
+      ...(exitCode === undefined ? {} : { exitCode }),
+      ...(durationMs === undefined ? {} : { durationMs }),
+      ...(typeof command?.usedRtk === "boolean" ? { usedRtk: command.usedRtk } : {}),
+      ...(typeof command?.timedOut === "boolean" ? { timedOut: command.timedOut } : {}),
+      ...(typeof command?.truncated === "boolean" ? { truncated: command.truncated } : {}),
     }];
   });
+}
+
+function normalizedUsage(record: JsonRecord): NormalizedAgentEvent | undefined {
+  const result = asRecord(record.result);
+  const usage = asRecord(record.usage) ?? (result ? asRecord(result.usage) : undefined);
+  if (usage === undefined) return undefined;
+  const inputTokens = usage.input_tokens ?? usage.inputTokens;
+  const outputTokens = usage.output_tokens ?? usage.outputTokens;
+  const cachedInputTokens = usage.cached_input_tokens ?? usage.cachedInputTokens;
+  if (typeof inputTokens !== "number" || typeof outputTokens !== "number") {
+    return undefined;
+  }
+  return {
+    type: "usage",
+    inputTokens,
+    outputTokens,
+    ...(typeof cachedInputTokens === "number" ? { cachedInputTokens } : {}),
+  };
 }
 
 export function parseCodexJsonLine(
@@ -116,7 +150,12 @@ export function parseCodexJsonLine(
   if (type === "turn.completed") {
     const result = asRecord(record.result);
     const summary = asText(record.summary) ?? (result ? asText(result.summary) : undefined);
-    return [...events, summary ? { type: "complete", summary } : { type: "complete" }];
+    const usage = normalizedUsage(record);
+    return [
+      ...events,
+      ...(usage === undefined ? [] : [usage]),
+      summary ? { type: "complete", summary } : { type: "complete" },
+    ];
   }
   if (type === "turn.failed" || type === "error") {
     const error = asRecord(record.error);
@@ -164,6 +203,11 @@ export function parseCodexJsonLine(
         type: "command",
         command: result.command,
         cwd: result.cwd,
+        ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
+        ...(result.durationMs === undefined ? {} : { durationMs: result.durationMs }),
+        ...(result.usedRtk === undefined ? {} : { usedRtk: result.usedRtk }),
+        ...(result.timedOut === undefined ? {} : { timedOut: result.timedOut }),
+        ...(result.truncated === undefined ? {} : { truncated: result.truncated }),
       });
     }
     for (const path of itemFiles(item)) events.push({ type: "file_hint", path });

@@ -78,11 +78,16 @@ describe("parseCodexJsonLine", () => {
                     argv: ["pwd"],
                     cwd: "/repo",
                     exitCode: 0,
+                    durationMs: 2,
+                    usedRtk: false,
                   },
                   {
                     argv: ["rtk", "git", "status", "--short"],
                     cwd: "/repo",
                     exitCode: 0,
+                    durationMs: 4,
+                    usedRtk: true,
+                    truncated: true,
                   },
                 ],
               },
@@ -91,9 +96,47 @@ describe("parseCodexJsonLine", () => {
         }),
       ),
     ).toEqual([
-      { type: "command", command: "pwd", cwd: "/repo" },
-      { type: "command", command: "rtk git status --short", cwd: "/repo" },
+      {
+        type: "command",
+        command: "pwd",
+        cwd: "/repo",
+        exitCode: 0,
+        durationMs: 2,
+        usedRtk: false,
+      },
+      {
+        type: "command",
+        command: "rtk git status --short",
+        cwd: "/repo",
+        exitCode: 0,
+        durationMs: 4,
+        usedRtk: true,
+        truncated: true,
+      },
       { type: "tool_end", name: "direct_exec", ok: true },
+    ]);
+  });
+
+  it("normalizes Codex token usage when the completed turn reports it", () => {
+    expect(
+      parseCodexJsonLine(
+        JSON.stringify({
+          type: "turn.completed",
+          usage: {
+            input_tokens: 12_000,
+            cached_input_tokens: 9_000,
+            output_tokens: 450,
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "usage",
+        inputTokens: 12_000,
+        cachedInputTokens: 9_000,
+        outputTokens: 450,
+      },
+      { type: "complete" },
     ]);
   });
 });

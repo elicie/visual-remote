@@ -298,10 +298,13 @@ describe("task log summaries", () => {
             type: "command",
             command: "/usr/bin/zsh -lc 'rtk git status --short'",
             cwd: "/home/elicie/Dev/ai-canvas",
+            durationMs: 4,
+            usedRtk: true,
+            truncated: true,
           },
         }),
       ),
-    ).toBe("RTK · rtk git status --short · ai-canvas");
+    ).toBe("RTK · rtk git status --short · ai-canvas · 4ms · 출력 축약");
     expect(
       logFromEvent(
         event({
@@ -324,6 +327,18 @@ describe("task log summaries", () => {
         }),
       ),
     ).toBeNull();
+    expect(
+      logFromEvent(
+        event({
+          event: {
+            type: "usage",
+            inputTokens: 12_000,
+            cachedInputTokens: 9_000,
+            outputTokens: 450,
+          },
+        }),
+      ),
+    ).toBe("토큰 · 입력 12,000 · 캐시 9,000 · 출력 450");
   });
 });
 

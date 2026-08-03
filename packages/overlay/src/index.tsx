@@ -457,7 +457,7 @@ function TaskStrip({
         </span>
       </header>
       <div class="strip-body">
-        <div class="status-row">
+        <div class="status-row" role="status">
           <span
             class="phase-mark"
             data-state={task.status}
@@ -672,7 +672,7 @@ function TaskCompactStrip({
         <span class="task-compact-copy">
           <span class="task-compact-project machine">{projectId}</span>
           <strong>{PHASE_LABELS[task.status]}</strong>
-          <span>{compactText(task.logs.at(-1) ?? task.requestText, 96)}</span>
+          <span>{compactText(task.requestText, 96)}</span>
         </span>
         <span class="task-compact-code machine">
           {task.id ? task.id.slice(0, 8) : "QUEUE"}
@@ -743,6 +743,17 @@ function Overlay({ host }: { host: HTMLElement }) {
   requestTextRef.current = requestText;
   renderRevisionRef.current = renderRevision;
   activeTaskIdRef.current = task?.id;
+
+  const trackRenderMutations = Boolean(
+    task
+    && (
+      ACTIVE_PHASES.has(task.status)
+      || (
+        task.status === "review"
+        && !["passed", "partial", "failed"].includes(task.verification ?? "")
+      )
+    ),
+  );
 
   const pageState = useCallback(
     () => ({
@@ -971,6 +982,7 @@ function Overlay({ host }: { host: HTMLElement }) {
   }, [host, open]);
 
   useEffect(() => {
+    if (!trackRenderMutations) return;
     let quietTimer: number | undefined;
     let maxTimer: number | undefined;
     const flushRevision = () => {
@@ -1014,7 +1026,7 @@ function Overlay({ host }: { host: HTMLElement }) {
         clearTimeout(maxTimer);
       }
     };
-  }, [host]);
+  }, [host, trackRenderMutations]);
 
   useEffect(() => {
     connectionRef.current?.send("browser.page_state", pageState());

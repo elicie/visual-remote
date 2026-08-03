@@ -65,7 +65,7 @@ Follow-up context:
 - Workspace: ${options.workspaceRoot}
 - Browser URL: ${options.context.page.url}
 ${options.upstreamUrl ? `- Local upstream URL: ${options.upstreamUrl}\n` : ""}
-Treat the repository worktree above as the already-resolved target. Run repository commands from that exact directory; do not search parent directories or run directory-discovery commands to locate the project again.
+Treat the workspace above as the already-resolved service directory and the repository worktree as its safety boundary. Run project commands from the workspace; do not search parent directories or run directory-discovery commands to locate the project again.
 
 User request:
 ${options.context.request.text}
