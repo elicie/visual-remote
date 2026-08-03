@@ -232,6 +232,18 @@ export const overlayStyles = String.raw`
     pointer-events: none;
   }
 
+  .region-box-label {
+    position: absolute;
+    top: 5px;
+    left: 5px;
+    padding: 2px 5px;
+    border: 1px solid #fffaf0;
+    background: var(--graphite);
+    color: #fffaf0;
+    font-size: 10px;
+    line-height: 1.4;
+  }
+
   .strip {
     position: fixed;
     z-index: 3;

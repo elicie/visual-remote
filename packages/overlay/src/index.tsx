@@ -272,17 +272,19 @@ function RequestStrip({
       ref={panelRef}
       class="strip"
       style={{ left: `${position.left}px`, top: `${position.top}px` }}
-      aria-label="수정 요청 작성"
+      aria-label={mode === "region" ? "영역 수정 요청 작성" : "수정 요청 작성"}
     >
       <header class="strip-head">
-        <span class="strip-title">{sourceLabel(first)}</span>
+        <span class="strip-title">
+          {mode === "region" ? "드래그한 화면 영역" : sourceLabel(first)}
+        </span>
         <span class="strip-code machine">
           {mode === "element"
             ? "TARGET 1"
             : mode === "multi"
               ? `TARGETS ${selection.length}/8`
               : mode === "region"
-                ? `REGION ${selection.length}/20`
+                ? "REGION"
                 : "PAGE"}
         </span>
       </header>
@@ -291,12 +293,18 @@ function RequestStrip({
           <strong>
             {mode === "page"
               ? "현재 페이지 컨텍스트"
-              : `${selection.length}개 대상 선택`}
+              : mode === "region"
+                ? "영역 선택됨"
+                : `${selection.length}개 대상 선택`}
           </strong>
           <span>
             {pendingCount > 0
-              ? `소스 ${pendingCount}개 확인 중`
-              : "컨텍스트 준비됨"}
+              ? mode === "region"
+                ? `범위 안 요소 ${pendingCount}개 확인 중`
+                : `소스 ${pendingCount}개 확인 중`
+              : mode === "region"
+                ? `범위 안 요소 ${selection.length}개 포함`
+                : "컨텍스트 준비됨"}
           </span>
         </div>
         <label class="visually-hidden" for="visual-request">
@@ -1639,15 +1647,15 @@ function Overlay({ host }: { host: HTMLElement }) {
       && hoverRect ? (
         <Reticle rect={hoverRect} kind="hover" />
       ) : null}
-      {mode !== "page" && (!task || !taskPanelHidden || requestOpen)
+      {mode !== "page"
+      && mode !== "region"
+      && (!task || !taskPanelHidden || requestOpen)
         ? selectedRects.map(({ item, rect }, index) => (
             <Reticle
               key={item.id}
               rect={rect}
               kind="selected"
-              {...(mode === "multi" || mode === "region"
-                ? { label: String(index + 1) }
-                : {})}
+              {...(mode === "multi" ? { label: String(index + 1) } : {})}
             />
           ))
         : null}
@@ -1661,7 +1669,9 @@ function Overlay({ host }: { host: HTMLElement }) {
             height: `${region.height}px`,
           }}
           aria-hidden="true"
-        />
+        >
+          <span class="region-box-label machine">영역</span>
+        </div>
       ) : null}
 
       {requestOpen && (!task || taskPanelHidden) ? (
