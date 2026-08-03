@@ -4,16 +4,20 @@
   "private": true,
   "type": "module",
   "bin": {
-    "visual": "./dist/index.js"
+    "visual": "./dist/index.js",
+    "visual-remote": "./dist/index.js"
   },
   "exports": {
     ".": "./src/index.ts",
     "./bridge": "./src/bridge.ts",
     "./doctor": "./src/doctor.ts",
-    "./status": "./src/status.ts"
+    "./init": "./src/init.ts",
+    "./status": "./src/status.ts",
+    "./vite": "./src/vite.ts",
+    "./next": "./src/next.ts"
   },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node24 --external:commander --external:http-proxy --external:ws --external:yaml --external:zod --outfile=dist/index.js --banner:js='#!/usr/bin/env node'",
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node24 --external:commander --external:http-proxy --external:ws --external:yaml --external:zod --outfile=dist/index.js --banner:js='#!/usr/bin/env node' && esbuild src/vite.ts --bundle --format=esm --platform=node --target=node24 --external:http-proxy --external:vite --external:ws --external:yaml --external:zod --outfile=dist/vite.js && esbuild src/next.ts --bundle --format=esm --platform=node --target=node24 --external:http-proxy --external:ws --external:yaml --external:zod --outfile=dist/next.js && esbuild src/next-client.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=dist/next-client.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
@@ -25,5 +29,8 @@
     "ws": "^8.21.1",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "vite": "^8.1.5"
   }
 }

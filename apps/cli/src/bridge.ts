@@ -1,3 +1,4 @@
+import { createConnection } from "node:net";
 import type { Writable } from "node:stream";
 import {
   createGatewayServer,
@@ -6,6 +7,7 @@ import {
 import {
   acquireWorktreeLock,
   createDefaultControlService,
+  discoverVisualDevConfigRoot,
   discoverGitWorktreeRoot,
   findAvailablePort,
   generatePairingToken,
@@ -25,6 +27,13 @@ import {
 
 export type { BridgeControlContext, BridgeMode } from "@visual-remote/bridge-core";
 
+export interface UpstreamMonitorOptions {
+  intervalMs?: number;
+  connectTimeoutMs?: number;
+  initialTimeoutMs?: number;
+  failureGraceMs?: number;
+}
+
 export interface BridgeDependencies {
   cwd?: string;
   environment?: NodeJS.ProcessEnv;
@@ -33,6 +42,7 @@ export interface BridgeDependencies {
   controlServiceFactory?: (
     context: BridgeControlContext,
   ) => ControlService | Promise<ControlService>;
+  upstreamMonitor?: false | UpstreamMonitorOptions;
 }
 
 export interface StartAttachBridgeOptions {
@@ -59,7 +69,111 @@ export interface RunningBridge {
   openUrl: string;
   gateway: GatewayServer;
   managedProcess?: ManagedProcess;
+  closed: Promise<void>;
   close(): Promise<void>;
+}
+
+const DEFAULT_UPSTREAM_MONITOR_INTERVAL_MS = 1_000;
+const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_MS = 500;
+const DEFAULT_UPSTREAM_FAILURE_GRACE_MS = 5_000;
+
+function positiveMilliseconds(value: number | undefined, fallback: number): number {
+  return value === undefined || !Number.isFinite(value) || value <= 0
+    ? fallback
+    : Math.max(1, Math.floor(value));
+}
+
+async function probeUpstream(upstreamUrl: string, timeoutMs: number): Promise<boolean> {
+  const upstream = new URL(upstreamUrl);
+  const hostname = upstream.hostname.startsWith("[")
+    ? upstream.hostname.slice(1, -1)
+    : upstream.hostname;
+  const port = Number(
+    upstream.port || (upstream.protocol === "https:" ? 443 : 80),
+  );
+
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    let timeout: NodeJS.Timeout | undefined;
+    const socket = createConnection({ host: hostname, port });
+    socket.unref();
+
+    const finish = (reachable: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout !== undefined) clearTimeout(timeout);
+      socket.destroy();
+      resolve(reachable);
+    };
+
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+    timeout = setTimeout(() => finish(false), timeoutMs);
+    timeout.unref();
+  });
+}
+
+function monitorUpstream(
+  bridge: RunningBridge,
+  options: UpstreamMonitorOptions,
+): void {
+  const intervalMs = positiveMilliseconds(
+    options.intervalMs,
+    DEFAULT_UPSTREAM_MONITOR_INTERVAL_MS,
+  );
+  const connectTimeoutMs = positiveMilliseconds(
+    options.connectTimeoutMs,
+    DEFAULT_UPSTREAM_CONNECT_TIMEOUT_MS,
+  );
+  const initialTimeoutMs = positiveMilliseconds(
+    options.initialTimeoutMs,
+    60_000,
+  );
+  const failureGraceMs = positiveMilliseconds(
+    options.failureGraceMs,
+    DEFAULT_UPSTREAM_FAILURE_GRACE_MS,
+  );
+  let connected = false;
+  let unavailableSince: number | undefined;
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
+
+  const stop = (): void => {
+    stopped = true;
+    if (timer !== undefined) clearTimeout(timer);
+  };
+  const schedule = (): void => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      void check().catch(() => undefined);
+    }, intervalMs);
+    timer.unref();
+  };
+  const check = async (): Promise<void> => {
+    if (stopped) return;
+    const reachable = await probeUpstream(bridge.upstreamUrl, connectTimeoutMs);
+    if (stopped) return;
+
+    const now = Date.now();
+    if (reachable) {
+      connected = true;
+      unavailableSince = undefined;
+      schedule();
+      return;
+    }
+
+    unavailableSince ??= now;
+    const timeoutMs = connected ? failureGraceMs : initialTimeoutMs;
+    if (now - unavailableSince >= timeoutMs) {
+      stop();
+      await bridge.close();
+      return;
+    }
+    schedule();
+  };
+
+  void bridge.closed.then(stop);
+  void check().catch(() => undefined);
 }
 
 function normalizeUpstream(value: string): string {
@@ -139,6 +253,7 @@ async function startBridgeCore(
       mode: options.mode,
       projectId: loadedConfig.config.project.id,
       repoRoot: loadedConfig.repoRoot,
+      configRoot: loadedConfig.configRoot,
       workspaceRoot: loadedConfig.workspaceRoot,
       upstreamUrl: options.upstreamUrl,
     };
@@ -169,7 +284,11 @@ async function startBridgeCore(
     await writeInstance(loadedConfig.repoRoot, instance, { environment });
     registryWritten = true;
 
-    let closed = false;
+    let resolveClosed = (): void => undefined;
+    const closed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
+    let closePromise: Promise<void> | undefined;
     return {
       mode: options.mode,
       projectId: loadedConfig.config.project.id,
@@ -183,18 +302,25 @@ async function startBridgeCore(
       ...(options.managedProcess === undefined
         ? {}
         : { managedProcess: options.managedProcess }),
-      async close() {
-        if (closed) {
-          return;
-        }
-        closed = true;
-        await Promise.allSettled([
-          gateway?.close(),
-          options.managedProcess?.stop(),
-          controlService?.close?.(),
-        ]);
-        await removeInstance(loadedConfig.repoRoot, process.pid, { environment });
-        await lock?.release();
+      closed,
+      close() {
+        closePromise ??= (async () => {
+          try {
+            await Promise.allSettled([
+              gateway?.close(),
+              options.managedProcess?.stop(),
+              controlService?.close?.(),
+            ]);
+            await removeInstance(loadedConfig.repoRoot, process.pid, { environment });
+          } finally {
+            try {
+              await lock?.release();
+            } finally {
+              resolveClosed();
+            }
+          }
+        })();
+        return closePromise;
       },
     };
   } catch (error) {
@@ -215,9 +341,11 @@ export async function startAttachBridge(
   options: StartAttachBridgeOptions,
   dependencies: BridgeDependencies = {},
 ): Promise<RunningBridge> {
-  const repoRoot = await discoverGitWorktreeRoot(dependencies.cwd ?? process.cwd());
-  const loadedConfig = await loadVisualDevConfig(repoRoot);
-  return await startBridgeCore(
+  const cwd = dependencies.cwd ?? process.cwd();
+  const repoRoot = await discoverGitWorktreeRoot(cwd);
+  const configRoot = await discoverVisualDevConfigRoot(cwd, repoRoot);
+  const loadedConfig = await loadVisualDevConfig(repoRoot, { configRoot });
+  const bridge = await startBridgeCore(
     {
       mode: "attach",
       loadedConfig,
@@ -228,14 +356,26 @@ export async function startAttachBridge(
     },
     dependencies,
   );
+  if (dependencies.upstreamMonitor !== false) {
+    monitorUpstream(bridge, {
+      initialTimeoutMs: loadedConfig.config.upstream.ready.timeoutMs,
+      ...dependencies.upstreamMonitor,
+    });
+  }
+  return bridge;
 }
 
 export async function startManagedBridge(
   options: StartManagedBridgeOptions = {},
   dependencies: BridgeDependencies = {},
 ): Promise<RunningBridge> {
-  const repoRoot = await discoverGitWorktreeRoot(dependencies.cwd ?? process.cwd());
-  const loadedConfig = await loadVisualDevConfig(repoRoot, { requireConfig: true });
+  const cwd = dependencies.cwd ?? process.cwd();
+  const repoRoot = await discoverGitWorktreeRoot(cwd);
+  const configRoot = await discoverVisualDevConfigRoot(cwd, repoRoot);
+  const loadedConfig = await loadVisualDevConfig(repoRoot, {
+    requireConfig: true,
+    configRoot,
+  });
   const command = loadedConfig.config.upstream.command;
   if (command === undefined) {
     throw new Error("visual dev requires upstream.command in .visualdev/config.yaml");
@@ -341,6 +481,7 @@ export async function runBridgeUntilSignal(
     };
     for (const signal of signals) processLike.once(signal, shutdown);
     void bridge.managedProcess?.exit.then(shutdown);
+    void bridge.closed?.then(shutdown);
   });
 }
 

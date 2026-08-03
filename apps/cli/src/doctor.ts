@@ -1,10 +1,11 @@
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
   discoverGitWorktreeRoot,
+  discoverVisualDevConfigRoot,
   loadVisualDevConfig,
   VisualDevConfigError,
 } from "@visual-remote/bridge-core";
@@ -102,7 +103,11 @@ export async function runDoctor(
   }
 
   try {
-    const loaded = await loadVisualDevConfig(repoRoot);
+    const configRoot = await discoverVisualDevConfigRoot(
+      dependencies.cwd ?? process.cwd(),
+      repoRoot,
+    );
+    const loaded = await loadVisualDevConfig(repoRoot, { configRoot });
     checks.push({
       name: "config",
       status: loaded.loadedFiles.length === 0 ? "warning" : "pass",
@@ -113,7 +118,8 @@ export async function runDoctor(
     });
 
     if (await fileExists(loaded.localConfigPath)) {
-      const ignored = await isIgnored(repoRoot, ".visualdev/config.local.yaml");
+      const localConfigRelativePath = relative(repoRoot, loaded.localConfigPath);
+      const ignored = await isIgnored(repoRoot, localConfigRelativePath);
       checks.push({
         name: "local-config-ignore",
         status: ignored ? "pass" : "warning",

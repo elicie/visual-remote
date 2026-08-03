@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Command, InvalidArgumentError } from "commander";
@@ -9,6 +10,7 @@ import {
   type BridgeDependencies,
 } from "./bridge.js";
 import { formatDoctorChecks, runDoctor } from "./doctor.js";
+import { formatInitResult, initializeVisualDev } from "./init.js";
 import { formatBridgeStatus, getBridgeStatus } from "./status.js";
 import { assertServicePort } from "@visual-remote/bridge-core";
 
@@ -42,23 +44,48 @@ export function createCli(dependencies: CliDependencies = {}): Command {
   const program = new Command()
     .name("visual")
     .description("Visual Remote Dev Bridge")
-    .version("0.1.0");
+    .version("0.3.1");
 
   program
-    .command("attach")
+    .command("init")
+    .description("Configure Visual Remote for the current Vite or Next.js project")
+    .action(async () => {
+      const result = await initializeVisualDev(dependencies);
+      output(dependencies, formatInitResult(result));
+    });
+
+  program
+    .command("attach [upstream]", { isDefault: true })
     .description("Attach the Bridge to an existing development server")
-    .requiredOption("--upstream <url>", "existing development server URL")
+    .option("--upstream <url>", "existing development server URL")
     .option("--listen <port>", "gateway port (10001 or above)", parsePort)
     .option("--host <host>", "gateway bind host (default: 0.0.0.0)")
     .option("--public-url <url>", "public Gateway URL opened in the browser")
     .action(
-      async (options: {
-        upstream: string;
-        listen?: number;
-        host?: string;
-        publicUrl?: string;
-      }) => {
-        const bridge = await startAttachBridge(options, dependencies);
+      async (
+        upstream: string | undefined,
+        options: {
+          upstream?: string;
+          listen?: number;
+          host?: string;
+          publicUrl?: string;
+        },
+      ) => {
+        const upstreamUrl = options.upstream ?? upstream;
+        if (upstreamUrl === undefined) {
+          throw new Error(
+            "Provide the running app URL, for example: npx visual-remote http://localhost:9011",
+          );
+        }
+        const bridge = await startAttachBridge(
+          {
+            upstream: upstreamUrl,
+            ...(options.listen === undefined ? {} : { listen: options.listen }),
+            ...(options.host === undefined ? {} : { host: options.host }),
+            ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
+          },
+          dependencies,
+        );
         output(dependencies, formatBridgeSummary(bridge));
         await runBridgeUntilSignal(bridge);
       },
@@ -108,11 +135,16 @@ export async function main(
   await createCli(dependencies).parseAsync(argv);
 }
 
+function isDirectEntry(entryPath: string): boolean {
+  try {
+    return pathToFileURL(realpathSync(resolve(entryPath))).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
 const entryPath = process.argv[1];
-if (
-  entryPath !== undefined &&
-  pathToFileURL(resolve(entryPath)).href === import.meta.url
-) {
+if (entryPath !== undefined && isDirectEntry(entryPath)) {
   void main().catch((error: unknown) => {
     process.stderr.write(
       `${error instanceof Error ? error.message : "Unknown Visual Bridge error"}\n`,
@@ -123,4 +155,5 @@ if (
 
 export * from "./bridge.js";
 export * from "./doctor.js";
+export * from "./init.js";
 export * from "./status.js";

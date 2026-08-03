@@ -1,0 +1,205 @@
+import { resolve } from "node:path";
+import { startAttachBridge, type RunningBridge } from "./bridge.js";
+
+const DEVELOPMENT_SERVER_PHASE = "phase-development-server";
+const VISUAL_REWRITE_SOURCE = "/_visual/:path*";
+
+interface NextRewrite {
+  source: string;
+  destination: string;
+  basePath?: boolean;
+  locale?: boolean;
+  [key: string]: unknown;
+}
+
+interface NextRewriteGroups {
+  beforeFiles?: NextRewrite[];
+  afterFiles?: NextRewrite[];
+  fallback?: NextRewrite[];
+}
+
+type NextRewrites = NextRewrite[] | NextRewriteGroups;
+
+interface NextConfigLike extends Record<string, unknown> {
+  allowedDevOrigins?: string[];
+  rewrites?: () => NextRewrites | Promise<NextRewrites>;
+}
+
+type NextConfigFactory = (
+  phase: string,
+  context: Record<string, unknown>,
+) => NextConfigLike | Promise<NextConfigLike>;
+
+type NextConfigExport = NextConfigLike | NextConfigFactory;
+
+export interface VisualRemoteNextOptions {
+  cwd?: string;
+  bridgeHost?: string;
+  bridgePort?: number;
+  appPort?: number;
+}
+
+const runningBridges = new Map<string, Promise<RunningBridge>>();
+
+function validPort(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65_535
+    ? parsed
+    : undefined;
+}
+
+function commandLinePort(argv: readonly string[]): number | undefined {
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--port" || argument === "-p") {
+      return validPort(argv[index + 1]);
+    }
+    if (argument?.startsWith("--port=")) {
+      return validPort(argument.slice("--port=".length));
+    }
+    if (argument?.startsWith("-p") && argument.length > 2) {
+      return validPort(argument.slice(2));
+    }
+  }
+  return undefined;
+}
+
+export function resolveNextUpstream(
+  options: Pick<VisualRemoteNextOptions, "appPort"> = {},
+  argv: readonly string[] = process.argv,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const port =
+    validPort(options.appPort) ??
+    commandLinePort(argv) ??
+    validPort(environment.PORT) ??
+    3_000;
+  return `http://127.0.0.1:${port}`;
+}
+
+export function isNextDetachedTelemetryProcess(
+  argv: readonly string[] = process.argv,
+): boolean {
+  return argv.some((argument) =>
+    /[\\/]next[\\/]dist[\\/]telemetry[\\/]detached-flush\.js$/.test(argument),
+  );
+}
+
+function withoutVisualRewrite(rewrites: NextRewrite[] | undefined): NextRewrite[] {
+  return (rewrites ?? []).filter((rewrite) => rewrite.source !== VISUAL_REWRITE_SOURCE);
+}
+
+export function mergeNextRewrites(
+  existing: NextRewrites | undefined,
+  gatewayUrl: string,
+): NextRewriteGroups {
+  const visualRewrite: NextRewrite = {
+    source: VISUAL_REWRITE_SOURCE,
+    destination: `${gatewayUrl}/_visual/:path*`,
+    basePath: false,
+    locale: false,
+  };
+
+  if (Array.isArray(existing)) {
+    return {
+      beforeFiles: [visualRewrite],
+      afterFiles: withoutVisualRewrite(existing),
+      fallback: [],
+    };
+  }
+
+  return {
+    beforeFiles: [visualRewrite, ...withoutVisualRewrite(existing?.beforeFiles)],
+    afterFiles: withoutVisualRewrite(existing?.afterFiles),
+    fallback: withoutVisualRewrite(existing?.fallback),
+  };
+}
+
+function addRequiredDevOrigin(config: NextConfigLike): NextConfigLike {
+  const existing = Array.isArray(config.allowedDevOrigins)
+    ? config.allowedDevOrigins
+    : [];
+  const required = ["dev", "localhost", "127.0.0.1"];
+  return {
+    ...config,
+    allowedDevOrigins: [
+      ...existing,
+      ...required.filter((origin) => !existing.includes(origin)),
+    ],
+  };
+}
+
+function ensureBridge(options: VisualRemoteNextOptions): Promise<RunningBridge> {
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const existing = runningBridges.get(cwd);
+  if (existing !== undefined) return existing;
+
+  const bridge = startAttachBridge(
+    {
+      upstream: resolveNextUpstream(options),
+      ...(options.bridgeHost === undefined ? {} : { host: options.bridgeHost }),
+      ...(options.bridgePort === undefined ? {} : { listen: options.bridgePort }),
+    },
+    { cwd },
+  );
+  runningBridges.set(cwd, bridge);
+  void bridge.then(
+    (running) => {
+      running.gateway.server.unref();
+      void running.closed.then(() => {
+        if (runningBridges.get(cwd) === bridge) runningBridges.delete(cwd);
+      });
+    },
+    () => {
+      if (runningBridges.get(cwd) === bridge) runningBridges.delete(cwd);
+    },
+  );
+  process.once("beforeExit", () => {
+    void closeVisualRemoteNext(cwd);
+  });
+  return bridge;
+}
+
+export async function closeVisualRemoteNext(cwd = process.cwd()): Promise<void> {
+  const key = resolve(cwd);
+  const bridge = runningBridges.get(key);
+  runningBridges.delete(key);
+  if (bridge === undefined) return;
+  const running = await bridge.catch(() => undefined);
+  await running?.close();
+}
+
+/**
+ * Adds development-only Visual Remote routes to a Next.js config while keeping
+ * the application's original origin, API routes, and HMR endpoints unchanged.
+ */
+export function withVisualRemote(
+  nextConfig: NextConfigExport = {},
+  options: VisualRemoteNextOptions = {},
+): NextConfigFactory {
+  return async (phase, context) => {
+    const configured =
+      typeof nextConfig === "function"
+        ? await nextConfig(phase, context)
+        : nextConfig;
+    const config = addRequiredDevOrigin(configured ?? {});
+    if (phase !== DEVELOPMENT_SERVER_PHASE || isNextDetachedTelemetryProcess()) {
+      return config;
+    }
+
+    const bridge = await ensureBridge(options);
+    const existingRewrites = config.rewrites;
+    return {
+      ...config,
+      async rewrites() {
+        const existing =
+          existingRewrites === undefined
+            ? undefined
+            : await existingRewrites.call(config);
+        return mergeNextRewrites(existing, bridge.gatewayUrl);
+      },
+    };
+  };
+}
+
+export default withVisualRemote;

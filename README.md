@@ -16,7 +16,48 @@
 Node.js와 pnpm 버전은 각각 `.nvmrc`와 `package.json`에 고정되어 있습니다.
 다른 Node.js 버전에서는 `engine-strict` 설정으로 설치가 중단됩니다.
 
-## 빠른 시작
+## 가장 빠른 사용
+
+Vite 또는 Next.js 앱의 `package.json`이 있는 폴더에서 한 번만 초기화합니다.
+Next.js 자동 통합은 `instrumentation-client`를 지원하는 Next.js 15.3 이상이
+필요합니다.
+
+```bash
+npx --yes visual-remote@latest init
+```
+
+`init`은 프로젝트 종류를 감지하고 다음 작업을 수행합니다.
+
+- 현재 프로젝트에 `visual-remote`를 개발 의존성으로 설치합니다.
+- Vite에서는 `vite.config`에 `visualRemote()` 플러그인을 추가합니다.
+- Next.js에서는 `next.config`에 `withVisualRemote()`를 적용하고
+  `instrumentation-client`에 개발 전용 클라이언트 로더를 추가합니다.
+- 현재 폴더에 `.visualdev/config.yaml`을 생성합니다.
+
+이후에는 앱을 평소처럼 실행합니다.
+
+```bash
+npm run dev
+```
+
+브라우저에서는 앱의 원래 주소를 그대로 엽니다. 앱이 `localhost:9011`에서
+실행된다면 Visual Remote도 `http://localhost:9011`에서 표시됩니다. 내부 Bridge는
+`10001`부터 빈 포트를 사용하지만 사용자가 그 포트로 접속할 필요는 없습니다.
+
+```text
+http://localhost:9011/api/*       → 기존 앱이 그대로 처리
+http://localhost:9011/@vite/*     → 기존 Vite HMR이 그대로 처리
+http://localhost:9011/_next/*     → 기존 Next.js 자산/HMR이 그대로 처리
+http://localhost:9011/_visual/*   → 내부 Visual Remote Bridge로만 전달
+```
+
+이미 실행 중이던 개발 서버가 있다면 `init` 후 한 번 재시작해야 변경된 설정이
+적용됩니다. Portr를 사용할 때도 내부 Bridge 포트가 아니라 기존 앱 포트만 노출합니다.
+
+자동 통합은 Vite와 Next.js 프로젝트를 지원합니다. 다른 프레임워크나 설정 파일을
+자동으로 수정하고 싶지 않은 프로젝트에서는 아래의 `attach` 방식을 사용할 수 있습니다.
+
+## 저장소에서 개발
 
 저장소를 받은 뒤 NVM을 불러오고 고정된 Node.js 버전을 선택합니다.
 
@@ -42,8 +83,7 @@ corepack pnpm build
 node apps/cli/dist/index.js doctor
 ```
 
-`doctor`에서 Git 작업 트리는 통과하고, 아직 `.visualdev/config.yaml`을 만들지
-않았다면 attach 기본값을 사용할 수 있다는 경고가 표시됩니다.
+`doctor`에서 Git 작업 트리, 현재 프로젝트 설정과 Codex 실행 환경을 확인합니다.
 
 ## 자동화 셸에서 Node.js 24 사용
 
@@ -61,39 +101,11 @@ corepack pnpm test
 이 저장소의 `AGENTS.md`에도 같은 절차가 기록되어 있습니다. 자동화는 설치나
 검증 전에 반드시 `node --version`이 `v24.18.0`인지 확인해야 합니다.
 
-## 기존 개발 서버에 연결
+## 설정
 
-먼저 대상 애플리케이션의 개발 서버를 `10001` 이상의 포트에서 실행합니다. 다음
-예시는 애플리케이션이 `0.0.0.0:10002`에서 실행 중인 경우입니다.
-
-```bash
-node apps/cli/dist/index.js attach \
-  --upstream http://127.0.0.1:10002 \
-  --listen 10001 \
-  --public-url https://visual.example.com
-```
-
-브리지는 `0.0.0.0:10001`에 바인딩하고 다음과 같은 주소를 출력합니다.
-
-```text
-Gateway:  http://dev:10001
-Public:   https://visual.example.com/
-Open:     https://visual.example.com/
-```
-
-브라우저에서는 출력된 공개 주소를 바로 엽니다. 별도의 페어링 링크나 토큰은
-필요하지 않습니다.
-
-Portr를 사용한다면 원래 개발 서버 포트가 아니라 브리지 Gateway 포트 `10001`을
-노출해야 합니다. 앱 화면, 개발 서버의 HMR, 브리지 제어 채널이 한 출처를
-사용합니다. `--public-url`에는 Portr가 발급한 공개 주소를 전달합니다. 공개 주소를
-항상 사용한다면 `.visualdev/config.local.yaml`의 `gateway.publicUrl`로도 설정할 수
-있습니다.
-
-## 개발 서버와 브리지를 함께 실행
-
-저장소 루트에 `.visualdev/config.yaml`을 만듭니다. 명령은 셸 문자열이 아니라
-인자 배열로 작성합니다.
+`init`은 명령을 실행한 현재 프로젝트 폴더에 설정을 생성합니다. 모노레포의 하위
+Vite 또는 Next.js 앱에서 실행하면 Git 루트가 아니라 해당 앱 폴더에 생성됩니다. 기존 설정은
+덮어쓰지 않습니다.
 
 ```yaml
 version: 1
@@ -104,7 +116,7 @@ project:
 
 gateway:
   host: 0.0.0.0
-  port: 10001
+  port: auto
   # publicUrl: https://visual.example.com
 
 upstream:
@@ -150,18 +162,25 @@ paths:
     - dist/**
 ```
 
-설정 후 다음 명령을 실행합니다.
+Vite 플러그인 또는 Next.js 설정 래퍼가 개발 서버와 함께 내부 Bridge를 시작합니다.
+`agent`, `verification`, `paths` 같은 상세 설정만 YAML에서 조정하면 됩니다.
+
+## 기존 attach 방식
+
+다음 명령은 이전 버전과의 호환을 위해 남아 있습니다.
 
 ```bash
-node apps/cli/dist/index.js dev
+npx --yes visual-remote@latest http://localhost:9011
 ```
 
-브리지가 개발 서버 프로세스를 시작하고 종료까지 관리합니다. 프레임워크가 Host
-또는 Origin 허용 목록을 사용한다면 로컬 Gateway와 실제 Portr 호스트를 추가합니다.
+이 방식은 별도 Gateway 주소를 열어 앱 전체를 프록시합니다. 자동 통합을 사용할 수
+있는 Vite와 Next.js 프로젝트에서는 `init`을 사용하고 원래 앱 주소로 접속합니다.
+설정 파일을 변경하지 않거나 다른 프레임워크에 붙일 때는 `attach`를 사용합니다.
+업스트림에 연결된 뒤 연결 실패가 5초간 계속되면 `attach` Bridge도 자동 종료됩니다.
 
 ## 브라우저에서 변경 요청
 
-1. 출력된 공개 주소를 엽니다.
+1. 평소 사용하는 앱 주소를 엽니다.
 2. `Command+Shift+G` 또는 `Ctrl+Shift+G`로 오버레이를 열고 닫습니다.
 3. 전체 작업 내역을 보려면 `작업 보드 ↗`를 눌러 별도 탭을 엽니다.
 4. 변경을 요청하려면 요소 하나, 여러 요소, 영역 또는 페이지 전체를 선택합니다.
@@ -191,14 +210,16 @@ Overlay에서 `작업 보드 ↗`를 다시 눌러 새 세션을 엽니다. 연�
 현재 제공하는 명령은 다음과 같습니다.
 
 ```bash
-node apps/cli/dist/index.js attach --help
-node apps/cli/dist/index.js dev --help
-node apps/cli/dist/index.js status
-node apps/cli/dist/index.js doctor
+npx --yes visual-remote@latest init
+visual attach --help
+visual dev --help
+visual status
+visual doctor
 ```
 
-- `attach`: 이미 실행 중인 개발 서버 앞에 브리지를 연결합니다.
-- `dev`: 설정된 개발 서버와 브리지를 함께 실행합니다.
+- `init`: 현재 Vite 또는 Next.js 앱에 개발 전용 통합을 설치합니다.
+- `attach`: 기본 명령의 명시적 이름이며 기존 사용법과 호환됩니다.
+- `dev`: `init` 설정을 사용해 앱과 브리지를 함께 실행하는 선택 명령입니다.
 - `status`: 현재 Git 작업 트리의 브리지 실행 상태를 확인합니다.
 - `doctor`: Git, 설정 파일, 개발 명령과 Codex 사용 가능 여부를 점검합니다.
 
@@ -224,6 +245,9 @@ corepack pnpm audit --prod
 packages/overlay/dist/client.js
 packages/overlay/dist/viewer.js
 apps/cli/dist/index.js
+apps/cli/dist/vite.js
+apps/cli/dist/next.js
+apps/cli/dist/next-client.js
 ```
 
 ## 저장소 구조
@@ -263,6 +287,7 @@ node --version
 
 ### 설정 파일 경고가 표시되는 경우
 
-기존 서버에 연결하는 `attach`는 설정 파일 없이도 기본값으로 실행할 수 있습니다.
-브리지가 개발 서버를 직접 관리해야 한다면 `.visualdev/config.yaml`을 작성한 뒤
-`doctor`를 다시 실행합니다.
+Vite 또는 Next.js 앱의 `package.json`이 있는 폴더에서 `visual init`을 실행한 뒤
+`doctor`를 다시 실행합니다. Vite는 `vite.config`, Next.js는 `next.config`와
+`instrumentation-client`가 구성되어야 합니다. 모노레포에서는 Git 루트가 아니라
+실제 앱 폴더에서 실행합니다.

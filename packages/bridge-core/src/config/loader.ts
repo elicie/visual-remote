@@ -1,5 +1,5 @@
-import { readFile, realpath } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { ZodError } from "zod";
 import {
@@ -26,6 +26,7 @@ export class VisualDevConfigError extends Error {
 export interface LoadedVisualDevConfig {
   config: VisualDevConfig;
   repoRoot: string;
+  configRoot: string;
   workspaceRoot: string;
   configPath: string;
   localConfigPath: string;
@@ -34,6 +35,7 @@ export interface LoadedVisualDevConfig {
 
 export interface LoadVisualDevConfigOptions {
   requireConfig?: boolean;
+  configRoot?: string;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -104,14 +106,56 @@ function isWithinRoot(root: string, candidate: string): boolean {
   return pathFromRoot === "" || (!pathFromRoot.startsWith(`..${sep}`) && pathFromRoot !== "..");
 }
 
+async function configExists(root: string): Promise<boolean> {
+  try {
+    await stat(join(root, CONFIG_PATH));
+    return true;
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+export async function discoverVisualDevConfigRoot(
+  startDirectory: string,
+  repositoryRoot: string,
+): Promise<string> {
+  const repoRoot = await realpath(repositoryRoot);
+  let cursor = await realpath(startDirectory);
+  if (!isWithinRoot(repoRoot, cursor)) {
+    throw new VisualDevConfigError(`Project directory is outside Git worktree: ${cursor}`);
+  }
+
+  while (true) {
+    if (await configExists(cursor)) return cursor;
+    if (cursor === repoRoot) return repoRoot;
+    const parent = dirname(cursor);
+    if (parent === cursor || !isWithinRoot(repoRoot, parent)) return repoRoot;
+    cursor = parent;
+  }
+}
+
 export async function loadVisualDevConfig(
   repositoryRoot: string,
   options: LoadVisualDevConfigOptions = {},
 ): Promise<LoadedVisualDevConfig> {
   const repoRoot = await realpath(repositoryRoot);
-  const configPath = join(repoRoot, CONFIG_PATH);
-  const localConfigPath = join(repoRoot, LOCAL_CONFIG_PATH);
-  const projectId = basename(repoRoot);
+  const configRoot = await realpath(options.configRoot ?? repoRoot);
+  if (!isWithinRoot(repoRoot, configRoot)) {
+    throw new VisualDevConfigError(
+      `Config directory is outside Git worktree: ${configRoot}`,
+    );
+  }
+  const configPath = join(configRoot, CONFIG_PATH);
+  const localConfigPath = join(configRoot, LOCAL_CONFIG_PATH);
+  const projectId = basename(configRoot);
 
   const baseDocument = await readYamlMapping(configPath, options.requireConfig ?? false);
   const localDocument = await readYamlMapping(localConfigPath, false);
@@ -149,7 +193,7 @@ export async function loadVisualDevConfig(
 
   const unresolvedWorkspace = isAbsolute(config.project.workspace)
     ? config.project.workspace
-    : resolve(repoRoot, config.project.workspace);
+    : resolve(configRoot, config.project.workspace);
 
   let workspaceRoot: string;
   try {
@@ -171,6 +215,7 @@ export async function loadVisualDevConfig(
   return {
     config,
     repoRoot,
+    configRoot,
     workspaceRoot,
     configPath,
     localConfigPath,

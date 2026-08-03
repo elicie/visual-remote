@@ -37,6 +37,23 @@ async function close(server: Server): Promise<void> {
   });
 }
 
+async function within<T>(promise: Promise<T>, timeoutMs = 2_000): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`Operation did not finish within ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 describe("attach CLI lifecycle", () => {
   it("starts with service-safe defaults, registers status, and cleans up", async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "visual-cli-repo-"));
@@ -71,7 +88,7 @@ describe("attach CLI lifecycle", () => {
 
     try {
       expect(Number(new URL(bridge.gatewayUrl).port)).toBeGreaterThanOrEqual(10_001);
-      expect(new URL(bridge.gatewayUrl).hostname).toBe("dev");
+      expect(new URL(bridge.gatewayUrl).hostname).toBe("localhost");
       expect(bridge.gateway.address()?.host).toBe("0.0.0.0");
       expect(bridge.openUrl).toBe("https://portr.example.test/");
       expect(formatBridgeSummary(bridge)).toContain("Upstream:");
@@ -93,6 +110,53 @@ describe("attach CLI lifecycle", () => {
     expect(await getBridgeStatus({ cwd: repoRoot, environment })).toEqual({
       running: false,
     });
+  });
+
+  it("closes and unregisters after the attached upstream disappears", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "visual-cli-orphan-repo-"));
+    const runtimeDirectory = await mkdtemp(join(tmpdir(), "visual-cli-orphan-runtime-"));
+    await execFileAsync("git", ["init", "--quiet", repoRoot]);
+    const upstreamPort = await findAvailablePort(
+      35_000 + (process.pid % 5_000),
+      "127.0.0.1",
+    );
+    const upstream = createServer((_request, response) => response.end("ok"));
+    await listen(upstream, upstreamPort);
+    const environment = {
+      ...process.env,
+      XDG_RUNTIME_DIR: runtimeDirectory,
+    };
+    const bridge = await startAttachBridge(
+      { upstream: `http://127.0.0.1:${upstreamPort}` },
+      {
+        cwd: repoRoot,
+        environment,
+        upstreamMonitor: {
+          intervalMs: 10,
+          connectTimeoutMs: 20,
+          initialTimeoutMs: 40,
+          failureGraceMs: 40,
+        },
+        controlServiceFactory: (context) =>
+          createBasicControlService({ project: { id: context.projectId } }),
+      },
+    );
+    let upstreamClosed = false;
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await close(upstream);
+      upstreamClosed = true;
+      await within(bridge.closed);
+
+      expect(bridge.gateway.address()).toBeUndefined();
+      expect(await getBridgeStatus({ cwd: repoRoot, environment })).toEqual({
+        running: false,
+      });
+    } finally {
+      await bridge.close();
+      if (!upstreamClosed) await close(upstream);
+    }
   });
 
   it("formats doctor results without hiding warning/failure labels", () => {
@@ -138,6 +202,33 @@ describe("attach CLI lifecycle", () => {
 });
 
 describe("Bridge process lifecycle", () => {
+  it("exits when an attached Bridge closes itself", async () => {
+    const processLike = Object.assign(new EventEmitter(), {
+      exit: vi.fn(),
+    });
+    let resolveClosed = (): void => undefined;
+    const closed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
+    const closeBridge = vi.fn(async () => undefined);
+    const bridge = { close: closeBridge, closed } as unknown as RunningBridge;
+
+    const running = runBridgeUntilSignal(
+      bridge,
+      processLike as unknown as NonNullable<
+        Parameters<typeof runBridgeUntilSignal>[1]
+      >,
+    );
+    resolveClosed();
+    await running;
+
+    expect(closeBridge).toHaveBeenCalledOnce();
+    expect(processLike.exit).toHaveBeenCalledWith(0);
+    for (const registeredSignal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+      expect(processLike.listenerCount(registeredSignal)).toBe(0);
+    }
+  });
+
   it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
     "closes on %s and removes all signal listeners",
     async (signal) => {
