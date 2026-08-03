@@ -1,11 +1,51 @@
 {
-  "name": "visual-remote-dev-bridge",
-  "version": "0.1.0",
-  "private": true,
+  "name": "visual-remote",
+  "version": "0.3.1",
+  "description": "Visual bridge from a running web UI to Codex in its Git worktree",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elicie/visual-remote.git"
+  },
+  "homepage": "https://github.com/elicie/visual-remote#readme",
+  "bugs": {
+    "url": "https://github.com/elicie/visual-remote/issues"
+  },
+  "files": [
+    "apps/cli/dist/index.js",
+    "apps/cli/dist/vite.js",
+    "apps/cli/dist/next.js",
+    "apps/cli/dist/next-client.js",
+    "apps/cli/vite.d.ts",
+    "apps/cli/next.d.ts",
+    "apps/cli/next-client.d.ts",
+    "packages/overlay/dist/client.js",
+    "packages/overlay/dist/viewer.js"
+  ],
   "bin": {
-    "visual": "./apps/cli/dist/index.js"
+    "visual": "./apps/cli/dist/index.js",
+    "visual-remote": "./apps/cli/dist/index.js"
+  },
+  "exports": {
+    "./vite": {
+      "types": "./apps/cli/vite.d.ts",
+      "import": "./apps/cli/dist/vite.js"
+    },
+    "./next": {
+      "types": "./apps/cli/next.d.ts",
+      "import": "./apps/cli/dist/next.js",
+      "default": "./apps/cli/dist/next.js"
+    },
+    "./next/client": {
+      "types": "./apps/cli/next-client.d.ts",
+      "import": "./apps/cli/dist/next-client.js",
+      "default": "./apps/cli/dist/next-client.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "engines": {
     "node": ">=24"
@@ -18,7 +58,23 @@
     "test": "vitest run",
     "test:e2e": "corepack pnpm run build:overlay && corepack pnpm exec playwright test --config tests/e2e/playwright.config.ts",
     "test:watch": "vitest",
-    "typecheck": "corepack pnpm -r --if-present typecheck && tsc --noEmit -p tsconfig.tests.json"
+    "typecheck": "corepack pnpm -r --if-present typecheck && tsc --noEmit -p tsconfig.tests.json",
+    "prepack": "corepack pnpm build"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "http-proxy": "^1.18.1",
+    "ws": "^8.21.1",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "vite": ">=5"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
@@ -33,7 +89,7 @@
     "esbuild": "^0.28.1",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10",
-    "ws": "^8.21.1"
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
   }
 }

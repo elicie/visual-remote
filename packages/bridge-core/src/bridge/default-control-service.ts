@@ -11,7 +11,9 @@ export async function createDefaultControlService(
   context: BridgeControlContext,
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<ControlService> {
-  const loaded = await loadVisualDevConfig(context.repoRoot);
+  const loaded = await loadVisualDevConfig(context.repoRoot, {
+    ...(context.configRoot === undefined ? {} : { configRoot: context.configRoot }),
+  });
   if (loaded.config.agent.adapter !== "codex") {
     throw new Error(
       `Agent adapter ${loaded.config.agent.adapter} is not implemented in this MVP build`,

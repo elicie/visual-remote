@@ -501,7 +501,7 @@ function rejectUpgrade(socket: NodeJS.WritableStream, statusCode: number, reason
 }
 
 function gatewayDisplayHost(host: string): string {
-  if (host === "0.0.0.0" || host === "::") return "dev";
+  if (host === "0.0.0.0" || host === "::") return "localhost";
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
