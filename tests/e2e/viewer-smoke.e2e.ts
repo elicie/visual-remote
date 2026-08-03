@@ -176,6 +176,34 @@ test("standalone viewer covers bootstrap, live review, read-only access, and mob
 
   await page.goto(fixture.origin);
   await page.keyboard.press("Control+Shift+G");
+
+  const visualToolbar = page.getByRole("navigation", {
+    name: "Visual Bridge 도구",
+  });
+  await visualToolbar.getByRole("button", { name: "영역" }).click();
+  const fixtureMain = await page.locator("main").boundingBox();
+  expect(fixtureMain).not.toBeNull();
+  await page.mouse.move(fixtureMain!.x + 20, fixtureMain!.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(
+    fixtureMain!.x + fixtureMain!.width - 20,
+    fixtureMain!.y + fixtureMain!.height - 20,
+  );
+  await page.mouse.up();
+
+  const regionRequest = page.getByRole("region", {
+    name: "영역 수정 요청 작성",
+  });
+  await expect(regionRequest).toContainText("드래그한 화면 영역");
+  await expect(regionRequest).toContainText("영역 선택됨");
+  await expect(regionRequest).toContainText(/범위 안 요소 \d+개 포함/);
+  await expect(page.locator(".region-box-label")).toHaveText("영역");
+  await expect(page.locator('.reticle[data-kind="selected"]')).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  await visualToolbar
+    .getByRole("button", { name: "요소", exact: true })
+    .click();
   await page.getByRole("button", { name: "Save changes" }).click();
   const overlayRequest = page.getByPlaceholder(
     "선택한 화면을 어떻게 바꿀까요?",
