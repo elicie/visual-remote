@@ -14,6 +14,7 @@ import {
   loadVisualDevConfig,
   MIN_SERVICE_PORT,
   removeInstance,
+  removeInstanceSync,
   startManagedProcess,
   type BridgeControlContext,
   type BridgeInstanceRecord,
@@ -284,6 +285,16 @@ async function startBridgeCore(
     await writeInstance(loadedConfig.repoRoot, instance, { environment });
     registryWritten = true;
 
+    const emergencyExitCleanup = (): void => {
+      try {
+        removeInstanceSync(loadedConfig.repoRoot, process.pid, { environment });
+        lock?.releaseSync();
+      } catch {
+        // Exit hooks cannot recover; stale owner state is reclaimed next start.
+      }
+    };
+    process.once("exit", emergencyExitCleanup);
+
     let resolveClosed = (): void => undefined;
     const closed = new Promise<void>((resolve) => {
       resolveClosed = resolve;
@@ -305,6 +316,7 @@ async function startBridgeCore(
       closed,
       close() {
         closePromise ??= (async () => {
+          process.off("exit", emergencyExitCleanup);
           try {
             await Promise.allSettled([
               gateway?.close(),

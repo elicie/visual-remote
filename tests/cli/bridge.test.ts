@@ -18,6 +18,9 @@ import {
   acquireWorktreeLock,
   BridgeAlreadyRunningError,
   findAvailablePort,
+  readInstance,
+  removeInstanceSync,
+  writeInstance,
 } from "@visual-remote/bridge-core";
 import { createBasicControlService } from "@visual-remote/gateway";
 
@@ -198,6 +201,37 @@ describe("attach CLI lifecycle", () => {
 
     const afterRelease = await acquireWorktreeLock(repoRoot, { environment });
     await afterRelease.release();
+  });
+
+  it("cleans registry ownership synchronously during process exit", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "visual-cli-exit-repo-"));
+    const runtimeDirectory = await mkdtemp(join(tmpdir(), "visual-cli-exit-runtime-"));
+    await execFileAsync("git", ["init", "--quiet", repoRoot]);
+    const environment = {
+      ...process.env,
+      XDG_RUNTIME_DIR: runtimeDirectory,
+    };
+    const lock = await acquireWorktreeLock(repoRoot, { environment });
+    await writeInstance(
+      repoRoot,
+      {
+        projectId: "exit-fixture",
+        repoRoot,
+        pid: process.pid,
+        gatewayUrl: "http://127.0.0.1:10001",
+        upstreamUrl: "http://127.0.0.1:10002",
+        status: "idle",
+        startedAt: new Date().toISOString(),
+      },
+      { environment },
+    );
+
+    removeInstanceSync(repoRoot, process.pid, { environment });
+    lock.releaseSync();
+
+    expect(await readInstance(repoRoot, { environment })).toBeUndefined();
+    const afterCleanup = await acquireWorktreeLock(repoRoot, { environment });
+    await afterCleanup.release();
   });
 });
 
