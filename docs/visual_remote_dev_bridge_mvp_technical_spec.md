@@ -561,6 +561,8 @@ security:
 
 - 저장소 루트는 config에서 임의 지정하지 않고 Git으로 탐지한다.
 - `workspace`는 모노레포 내부 앱의 기준 디렉터리다.
+- `paths.allowed`와 `paths.denied`는 workspace 기준이며 Bridge가 Git worktree 상대
+  경로로 정규화한다.
 - `command`는 shell 문자열이 아니라 executable/argv 배열로 저장한다.
 - `{upstreamPort}` 같은 placeholder만 허용한다.
 - denied path가 allowed path보다 항상 우선한다.
@@ -639,6 +641,11 @@ $XDG_RUNTIME_DIR/visual-bridge/<repoKey>/instance.json
 ```
 
 `visual list`는 registry와 PID 생존 여부를 확인해 오래된 항목을 정리한다.
+
+동일 worktree의 살아 있는 instance가 registry에 있으면 프레임워크 통합은 새
+Bridge를 시작하지 않고 해당 `gatewayUrl`을 재사용한다. lock 소유 프로세스만
+Bridge와 registry를 종료할 수 있으며, Vite/Next 설정을 평가한 비소유 프로세스는
+자신이 시작하지 않은 Bridge의 lifecycle을 건드리지 않는다.
 
 ---
 
@@ -1031,18 +1038,20 @@ interface BrowserSession {
 
 ### 12.2 브라우저 연결
 
-Bridge의 공개 주소를 직접 열면 Overlay가 별도 pairing token 없이 제어 채널에
-연결된다.
+Bridge가 시작될 때 터미널에 출력한 pairing 주소를 열면 Overlay가 제어 채널에
+연결된다. 공개 주소만 직접 연 브라우저에는 제어 권한을 부여하지 않는다.
 
 ```text
-https://admin.bridge.example/
+https://admin.bridge.example/#visual-pair=<token>
 ```
 
 브라우저 동작:
 
-1. 공개 주소를 연다.
-2. Overlay가 익명 control WebSocket을 연결한다.
-3. REST 제어 요청은 별도 Authorization header 없이 같은 origin으로 전송한다.
+1. 개발 서버가 출력한 pairing 주소를 연다.
+2. Overlay가 URL fragment의 token을 현재 탭의 sessionStorage에 보관하고 fragment를
+   제거한다.
+3. Overlay가 token으로 control WebSocket을 인증한다.
+4. REST 제어 요청은 같은 token을 Bearer Authorization header로 전송한다.
 
 독립 작업 보드는 Overlay가
 `GET /_visual/api/viewer-session`으로 호출마다 분리된 단기 viewer token과
@@ -1137,8 +1146,8 @@ WebSocket은 실시간 event와 command에 사용하고, 큰 artifact는 HTTP로
 | GET | `/_visual/api/artifacts/:id` | screenshot 등 artifact |
 | WS | `/_visual/ws` | 실시간 protocol |
 
-모든 제어 API는 Origin allowlist와 project ID 확인을 통과해야 한다. control
-요청에는 pairing token을 요구하지 않는다.
+모든 API와 WebSocket 연결은 Origin allowlist와 project ID 확인을 통과해야 한다.
+control 요청은 pairing token, 읽기 전용 요청은 유효한 viewer token을 요구한다.
 
 ---
 
@@ -1255,6 +1264,12 @@ CLI별 option이나 JSON output 형식은 빠르게 바뀔 수 있으므로 Brid
 - session ID 추출
 - cancel 시 process group 종료
 - 종료 code와 실패 원인 정규화
+- 등록 worktree 안의 읽기 전용 탐색은 임시 MCP 도구의 `argv` 배치로 직접 실행
+- 지원 명령은 RTK로 자동 변환하고, 셸 문법·변경 명령은 agent sandbox로 fallback
+- 직접 실행 명령은 명령별 허용 문법과 canonical path 검사를 통과해야 하며 timeout은
+  전체 child process group을 종료한다.
+- RTK availability는 MCP server 시작 시 한 번 확인하고 command duration, RTK 사용,
+  truncation과 Codex token usage를 normalized event로 기록한다.
 
 ### 15.3 NormalizedAgentEvent
 
@@ -1264,7 +1279,8 @@ type NormalizedAgentEvent =
   | { type: "phase"; name: string }
   | { type: "tool_start"; name: string; summary?: string }
   | { type: "tool_end"; name: string; ok: boolean }
-  | { type: "command"; command: string; cwd: string }
+  | { type: "command"; command: string; cwd: string; durationMs?: number; usedRtk?: boolean; truncated?: boolean }
+  | { type: "usage"; inputTokens: number; outputTokens: number; cachedInputTokens?: number }
   | { type: "file_hint"; path: string }
   | { type: "session"; sessionId: string }
   | { type: "warning"; text: string }
@@ -1490,7 +1506,8 @@ Bridge는 task 시작 revision과 task 완료 후 revision을 비교한다.
 6. DOM parent path + sibling index
 7. text hash + 주변 element 관계
 
-HMR 후 동일 target을 찾으면 computed style, rect, text, source를 다시 수집한다.
+HMR 후 동일 target을 찾으면 computed style, text와 source를 다시 수집한다. viewport
+스크롤에 따라 달라지는 rect의 x/y 좌표만으로는 변경 성공으로 판정하지 않는다.
 
 결과:
 
@@ -1511,7 +1528,10 @@ Overlay는 개발 모드에서 다음을 가볍게 감싼다.
 - `window.error`
 - `unhandledrejection`
 
-원본 console 동작은 유지한다. task 시작 시 timestamp를 기록하고 task 이후 새 오류만 검증 결과에 포함한다.
+원본 console 동작은 유지한다. task 시작 시 timestamp와 기존 오류 fingerprint를
+기록하고, 이후 처음 등장한 오류만 검증 결과에 포함한다. 같은 기존 개발 환경 오류가
+반복되거나 origin browser가 다른 route로 이동한 경우에는 이번 변경의 성공/실패로
+단정하지 않고 partial로 처리한다.
 
 수집하지 않는 것:
 
@@ -1739,6 +1759,8 @@ Bridge가 repository-specific process라고 해도 OS 수준에서 같은 사용
 - agent prompt의 destructive Git 명령 금지
 - HEAD/index 변화 감지
 - child process environment 최소화 및 로그 redaction
+- 직접 실행 도구는 `shell: false`, read-only allowlist, 최대 8개 명령, bounded output,
+  worktree 내부 realpath `cwd`만 허용
 - control API token 인증
 - Origin allowlist
 - Bridge는 `127.0.0.1`에만 bind
@@ -1981,7 +2003,7 @@ repo B gateway 4200 / upstream 44200
 - streaming HTML script injection
 - Overlay bundle serving
 - Shadow DOM toolbar
-- 익명 control WebSocket 연결
+- pairing token으로 인증한 control WebSocket 연결
 - browser session WebSocket
 
 완료 조건:
@@ -2129,7 +2151,7 @@ MVP release 전에 아래 항목을 모두 확인한다.
 | dirty tree task diff 분리 어려움 | temporary Git index + hidden before/after commit snapshot |
 | agent가 Git 명령을 수행함 | prompt 금지, HEAD/index guard, unsafe 상태 처리 |
 | agent가 repo 밖을 접근함 | path guard + CLI sandbox 설정, 향후 OS sandbox |
-| Portr URL이 외부에 노출됨 | 사용자가 승인한 익명 control 운영, Origin 검사, 공개 주소 관리 |
+| Portr URL이 외부에 노출됨 | 시작마다 회전하는 pairing token, Origin 검사, 공개 주소 관리 |
 | 여러 task가 같은 파일을 충돌 수정 | 저장소당 writer 1개와 queue |
 | Overlay가 app 조작을 방해함 | 비활성 시 pointer-events none, Shadow DOM, ignore subtree |
 | screenshot 실패 | best-effort artifact로 취급하고 DOM/source context를 기본으로 사용 |

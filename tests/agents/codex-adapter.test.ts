@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -17,11 +17,15 @@ async function executable(directory: string, source: string): Promise<string> {
   return path;
 }
 
-function input(root: string, environment: Record<string, string> = {}): AgentRunInput {
+function input(
+  root: string,
+  environment: Record<string, string> = {},
+  workspaceRoot = root,
+): AgentRunInput {
   return {
     taskId: "adapter-test",
     repoRoot: root,
-    workspaceRoot: root,
+    workspaceRoot,
     prompt: "edit the requested UI",
     contextBundlePath: resolve(root, "context.json"),
     environment,
@@ -46,7 +50,11 @@ console.log(JSON.stringify({
 }));
 `,
       );
-      const adapter = new CodexAdapter({ executable: command });
+      const adapter = new CodexAdapter({
+        executable: command,
+        rtkExecutable: false,
+        directExecMcpScript: false,
+      });
       const events: NormalizedAgentEvent[] = [];
       for await (const event of adapter.run(input(directory), new AbortController().signal)) {
         events.push(event);
@@ -100,6 +108,124 @@ console.log(JSON.stringify({
     }
   });
 
+  it("registers the bounded direct-exec MCP server for each Codex run", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "visual-codex-direct-test-"));
+    try {
+      const workspace = resolve(directory, "apps", "web");
+      await mkdir(workspace, { recursive: true });
+      const command = await executable(
+        directory,
+        `
+let body = "";
+for await (const chunk of process.stdin) body += chunk;
+console.log(JSON.stringify({
+  type:"item.completed",
+  item:{type:"agent_message",text:JSON.stringify({args:process.argv.slice(2),body,cwd:process.cwd()})}
+}));
+`,
+      );
+      const mcpScript = resolve(directory, "direct-exec-mcp.js");
+      const adapter = new CodexAdapter({
+        executable: command,
+        rtkExecutable: false,
+        directExecMcpScript: mcpScript,
+      });
+      const events: NormalizedAgentEvent[] = [];
+      for await (const event of adapter.run(
+        input(directory, {}, workspace),
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+      const message = events.find((event) => event.type === "message");
+      if (message?.type !== "message") throw new Error("Missing direct-exec prompt message");
+      const record = JSON.parse(message.text) as { args: string[]; body: string; cwd: string };
+      expect(record.cwd).toBe(workspace);
+      expect(record.args).toContain(workspace);
+      expect(record.args).toContain(
+        `mcp_servers.visual_remote_exec.command=${JSON.stringify(process.execPath)}`,
+      );
+      expect(record.args).toContain(
+        `mcp_servers.visual_remote_exec.args=${JSON.stringify([
+          mcpScript,
+          "--repo-root",
+          directory,
+          "--workspace-root",
+          workspace,
+          "--no-rtk",
+        ])}`,
+      );
+      expect(record.body).toContain("mcp__visual_remote_exec__run_readonly");
+      expect(record.body).toContain("executes without a shell");
+    } finally {
+      await rm(directory, { recursive: true });
+    }
+  });
+
+  it("adds RTK guidance when installed and preserves the repo cwd in command events", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "visual-codex-rtk-test-"));
+    try {
+      const command = await executable(
+        directory,
+        `
+let body = "";
+for await (const chunk of process.stdin) body += chunk;
+console.log(JSON.stringify({type:"thread.started",thread_id:"rtk-test"}));
+console.log(JSON.stringify({
+  type:"item.completed",
+  item:{type:"command_execution",command:"rtk rg component src",exit_code:0}
+}));
+console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:body}}));
+`,
+      );
+      const rtk = resolve(directory, "fake-rtk.mjs");
+      await writeFile(rtk, "#!/usr/bin/env node\nconsole.log('rtk 0.44.2');\n");
+      await chmod(rtk, 0o755);
+
+      const adapter = new CodexAdapter({
+        executable: command,
+        rtkExecutable: rtk,
+        directExecMcpScript: false,
+      });
+      const events: NormalizedAgentEvent[] = [];
+      for await (const event of adapter.run(input(directory), new AbortController().signal)) {
+        events.push(event);
+      }
+
+      expect(events).toContainEqual({
+        type: "command",
+        command: "rtk rg component src",
+        cwd: directory,
+      });
+      const message = events.find((event) => event.type === "message");
+      if (message?.type !== "message") throw new Error("Missing RTK prompt message");
+      expect(message.text).toContain("rtk 0.44.2 is installed");
+      expect(message.text).toContain("Prefix shell commands with RTK by default");
+      expect(message.text).toContain("rtk rg <pattern>");
+
+      const fallbackAdapter = new CodexAdapter({
+        executable: command,
+        rtkExecutable: resolve(directory, "missing-rtk"),
+        directExecMcpScript: false,
+      });
+      const fallbackEvents: NormalizedAgentEvent[] = [];
+      for await (const event of fallbackAdapter.run(
+        input(directory),
+        new AbortController().signal,
+      )) {
+        fallbackEvents.push(event);
+      }
+      const fallbackMessage = fallbackEvents.find((event) => event.type === "message");
+      if (fallbackMessage?.type !== "message") {
+        throw new Error("Missing fallback prompt message");
+      }
+      expect(fallbackMessage.text).toContain("RTK was not detected");
+      expect(fallbackMessage.text).toContain("Use native repository commands directly");
+    } finally {
+      await rm(directory, { recursive: true });
+    }
+  });
+
   it.skipIf(process.platform === "win32")(
     "terminates stubborn descendants in the agent process group on cancellation",
     async () => {
@@ -131,7 +257,11 @@ const ready = setInterval(() => {
 setInterval(() => {}, 1000);
 `,
         );
-        const adapter = new CodexAdapter({ executable: command, killGraceMs: 100 });
+        const adapter = new CodexAdapter({
+          executable: command,
+          killGraceMs: 100,
+          directExecMcpScript: false,
+        });
         const controller = new AbortController();
         const consume = async (): Promise<void> => {
           for await (const event of adapter.run(

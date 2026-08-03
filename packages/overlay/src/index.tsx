@@ -81,6 +81,7 @@ interface TaskView {
   diff: string;
   verification?: string;
   error?: string;
+  unavailableArtifacts?: Array<"files" | "diff" | "logs">;
 }
 
 const PHASE_LABELS: Record<TaskStatus, string> = {
@@ -456,7 +457,7 @@ function TaskStrip({
         </span>
       </header>
       <div class="strip-body">
-        <div class="status-row" role="status" aria-live="polite">
+        <div class="status-row" role="status">
           <span
             class="phase-mark"
             data-state={task.status}
@@ -491,6 +492,13 @@ function TaskStrip({
         {task.error ? (
           <div class="error-banner" role="alert">
             오류: {task.error}
+          </div>
+        ) : null}
+
+        {task.unavailableArtifacts && task.unavailableArtifacts.length > 0 ? (
+          <div class="error-banner" role="status">
+            일부 작업 정보를 불러오지 못했습니다: {task.unavailableArtifacts.join(", ")}.
+            작업 보드에서 다시 확인해 주세요.
           </div>
         ) : null}
 
@@ -625,6 +633,67 @@ function TaskStrip({
   );
 }
 
+function TaskCompactStrip({
+  task,
+  busyAction,
+  onExpand,
+  onCancel,
+}: {
+  task: TaskView;
+  busyAction: boolean;
+  onExpand: () => void;
+  onCancel: () => void;
+}) {
+  const active = ACTIVE_PHASES.has(task.status);
+  const terminal = ["review", "accepted", "reverted"].includes(task.status);
+  const error = ERROR_PHASES.has(task.status) || task.verification === "failed";
+  const phaseId = "visual-task-compact-phase";
+  const requestId = "visual-task-compact-request";
+  const actionId = "visual-task-compact-action";
+  return (
+    <section
+      class="task-compact"
+      data-active={active ? "true" : "false"}
+      data-error={error ? "true" : "false"}
+      aria-label="최소화된 작업 상태"
+    >
+      <button
+        type="button"
+        class="task-compact-main"
+        aria-labelledby={`${phaseId} ${requestId} ${actionId}`}
+        onClick={onExpand}
+      >
+        <span
+          class="phase-mark"
+          data-state={task.status}
+          data-terminal={terminal ? "true" : "false"}
+          data-error={error ? "true" : "false"}
+          aria-hidden="true"
+        />
+        <span class="task-compact-copy">
+          <strong id={phaseId}>{PHASE_LABELS[task.status]}</strong>
+          <span id={requestId} class="task-compact-request">
+            {task.requestText}
+          </span>
+          <span id={actionId} class="visually-hidden">
+            작업 상세 펼치기
+          </span>
+        </span>
+      </button>
+      {active ? (
+        <button
+          type="button"
+          class="task-compact-cancel"
+          disabled={!task.id || busyAction}
+          onClick={onCancel}
+        >
+          취소
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
 function Overlay({ host }: { host: HTMLElement }) {
   const pairedFromFragment = useMemo(
     () => parsePairingFragment(location.hash).token !== null,
@@ -677,6 +746,17 @@ function Overlay({ host }: { host: HTMLElement }) {
   renderRevisionRef.current = renderRevision;
   activeTaskIdRef.current = task?.id;
 
+  const trackRenderMutations = Boolean(
+    task
+    && (
+      ACTIVE_PHASES.has(task.status)
+      || (
+        task.status === "review"
+        && !["passed", "partial", "failed"].includes(task.verification ?? "")
+      )
+    ),
+  );
+
   const pageState = useCallback(
     () => ({
       url: location.href,
@@ -701,6 +781,7 @@ function Overlay({ host }: { host: HTMLElement }) {
                   : current.changedFiles,
               diff: artifacts.diff || current.diff,
               logs: artifacts.logs.length > 0 ? artifacts.logs : current.logs,
+              unavailableArtifacts: artifacts.unavailable,
             }
           : current,
       );
@@ -903,25 +984,51 @@ function Overlay({ host }: { host: HTMLElement }) {
   }, [host, open]);
 
   useEffect(() => {
-    let timer: number | undefined;
-    const observer = new MutationObserver(() => {
-      if (timer !== undefined) {
-        clearTimeout(timer);
+    if (!trackRenderMutations) return;
+    let quietTimer: number | undefined;
+    let maxTimer: number | undefined;
+    const flushRevision = () => {
+      if (quietTimer !== undefined) {
+        clearTimeout(quietTimer);
+        quietTimer = undefined;
       }
-      timer = window.setTimeout(() => {
-        setRenderRevision((revision) => revision + 1);
-      }, 250);
+      if (maxTimer !== undefined) {
+        clearTimeout(maxTimer);
+        maxTimer = undefined;
+      }
+      setRenderRevision((revision) => revision + 1);
+    };
+    const observer = new MutationObserver((records) => {
+      const hasPageMutation = records.some(
+        ({ target }) => target !== host && !host.contains(target),
+      );
+      if (!hasPageMutation) {
+        return;
+      }
+      if (quietTimer !== undefined) {
+        clearTimeout(quietTimer);
+      }
+      quietTimer = window.setTimeout(flushRevision, 150);
+      if (maxTimer === undefined) {
+        maxTimer = window.setTimeout(flushRevision, 1_000);
+      }
     });
-    if (document.body) {
-      observer.observe(document.body, { childList: true, subtree: true });
-    }
+    observer.observe(document.documentElement, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
     return () => {
       observer.disconnect();
-      if (timer !== undefined) {
-        clearTimeout(timer);
+      if (quietTimer !== undefined) {
+        clearTimeout(quietTimer);
+      }
+      if (maxTimer !== undefined) {
+        clearTimeout(maxTimer);
       }
     };
-  }, []);
+  }, [host, trackRenderMutations]);
 
   useEffect(() => {
     connectionRef.current?.send("browser.page_state", pageState());
@@ -1595,8 +1702,8 @@ function Overlay({ host }: { host: HTMLElement }) {
             aria-expanded={taskPanelHidden ? "false" : "true"}
             title={
               taskPanelHidden
-                ? "숨긴 작업 패널 열기"
-                : "작업은 계속 진행하고 패널만 숨기기"
+                ? "최소화된 작업 상세 펼치기"
+                : "작업 상태를 남기고 패널 최소화"
             }
             onClick={() => {
               if (taskPanelHidden) {
@@ -1607,7 +1714,7 @@ function Overlay({ host }: { host: HTMLElement }) {
               setTaskPanelHidden(true);
             }}
           >
-            {taskPanelHidden ? "작업 보기" : "작업 숨기기"}
+            {taskPanelHidden ? "작업 펼치기" : "작업 최소화"}
           </button>
         ) : null}
         {viewerUrl ? (
@@ -1641,6 +1748,15 @@ function Overlay({ host }: { host: HTMLElement }) {
           </span>
         </span>
       </nav>
+
+      {task && taskPanelHidden ? (
+        <TaskCompactStrip
+          task={task}
+          busyAction={busyAction}
+          onExpand={() => setTaskPanelHidden(false)}
+          onCancel={() => void runTaskAction("cancel")}
+        />
+      ) : null}
 
       {!requestOpen
       && (!task || taskPanelHidden || !ACTIVE_PHASES.has(task.status))

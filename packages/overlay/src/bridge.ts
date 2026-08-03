@@ -118,14 +118,17 @@ function recordOf(value: unknown): Record<string, unknown> | null {
 
 export function consumePairingToken(): string {
   const parsed = parsePairingFragment(location.hash);
-  safeSessionRemove(PAIRING_TOKEN_KEY);
-  safeSessionRemove(LAST_SEQUENCE_KEY);
   if (parsed.token) {
+    if (safeSessionGet(PAIRING_TOKEN_KEY) !== parsed.token) {
+      safeSessionRemove(LAST_SEQUENCE_KEY);
+    }
+    safeSessionSet(PAIRING_TOKEN_KEY, parsed.token);
     const nextUrl = `${location.pathname}${location.search}${parsed.remainingHash}`;
     history.replaceState(history.state, "", nextUrl);
+    return parsed.token;
   }
 
-  return "";
+  return safeSessionGet(PAIRING_TOKEN_KEY) ?? "";
 }
 
 export function consumeViewerToken(): string | null {
@@ -504,6 +507,42 @@ function diffFromValue(value: unknown): string {
   return typeof diff === "string" ? diff : "";
 }
 
+function unwrapShellCommand(command: string): string {
+  const match = /^(?:\/usr)?\/bin\/(?:bash|sh|zsh)\s+-lc\s+([\s\S]+)$/u.exec(
+    command.trim(),
+  );
+  if (!match?.[1]) return command;
+  const payload = match[1].trim();
+  if (
+    payload.length >= 2
+    && ((payload.startsWith("'") && payload.endsWith("'"))
+      || (payload.startsWith('"') && payload.endsWith('"')))
+  ) {
+    return payload.slice(1, -1);
+  }
+  return payload;
+}
+
+function commandLogLine(event: Record<string, unknown>): string | null {
+  if (typeof event.command !== "string") return null;
+  const command = unwrapShellCommand(event.command);
+  const runtime = event.usedRtk === true || /^rtk(?:\s|$)/u.test(command) ? "RTK" : "명령";
+  const cwd =
+    typeof event.cwd === "string"
+      ? event.cwd.split(/[\\/]/u).filter(Boolean).at(-1)
+      : undefined;
+  const metadata = [
+    cwd,
+    typeof event.durationMs === "number" ? `${event.durationMs}ms` : undefined,
+    event.timedOut === true ? "시간 초과" : undefined,
+    event.truncated === true ? "출력 축약" : undefined,
+  ].filter((value): value is string => Boolean(value));
+  return compactText(
+    `${runtime} · ${command}${metadata.length > 0 ? ` · ${metadata.join(" · ")}` : ""}`,
+    500,
+  );
+}
+
 function logLineFromValue(value: unknown): string | null {
   if (typeof value === "string") {
     return compactText(value, 500);
@@ -514,7 +553,11 @@ function logLineFromValue(value: unknown): string | null {
   }
   const event = recordOf(record.event) ?? record;
   const type = typeof event.type === "string" ? event.type : undefined;
+  if (type === "command") {
+    return commandLogLine(event);
+  }
   if (type === "tool_start" && typeof event.name === "string") {
+    if (event.name === "command_execution" || event.name === "direct_exec") return null;
     return compactText(
       `도구 시작 · ${event.name}${
         typeof event.summary === "string" ? ` · ${event.summary}` : ""
@@ -523,6 +566,7 @@ function logLineFromValue(value: unknown): string | null {
     );
   }
   if (type === "tool_end" && typeof event.name === "string") {
+    if (event.name === "command_execution" || event.name === "direct_exec") return null;
     return compactText(
       `도구 ${event.ok === false ? "실패" : "완료"} · ${event.name}`,
       500,
@@ -533,6 +577,20 @@ function logLineFromValue(value: unknown): string | null {
   }
   if (type === "file_hint" && typeof event.path === "string") {
     return compactText(`파일 · ${event.path}`, 500);
+  }
+  if (
+    type === "usage"
+    && typeof event.inputTokens === "number"
+    && typeof event.outputTokens === "number"
+  ) {
+    return compactText(
+      `토큰 · 입력 ${event.inputTokens.toLocaleString("en-US")}${
+        typeof event.cachedInputTokens === "number"
+          ? ` · 캐시 ${event.cachedInputTokens.toLocaleString("en-US")}`
+          : ""
+      } · 출력 ${event.outputTokens.toLocaleString("en-US")}`,
+      500,
+    );
   }
   const message =
     event.message ??

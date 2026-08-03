@@ -39,11 +39,16 @@ export function formatBridgeStatus(status: BridgeStatus): string {
     return "No Visual Bridge is running for this worktree.";
   }
   const { instance } = status;
-  return [
+  const rows = [
     `Project:  ${instance.projectId}`,
     `Status:   ${instance.status}`,
     `PID:      ${instance.pid}`,
     `Gateway:  ${instance.gatewayUrl}`,
     `Upstream: ${instance.upstreamUrl}`,
-  ].join("\n");
+  ];
+  if (instance.publicUrl !== undefined) rows.push(`Public:   ${instance.publicUrl}`);
+  if (instance.activeTaskId !== undefined) {
+    rows.push(`Active:   ${instance.activeTaskId}`);
+  }
+  return rows.join("\n");
 }

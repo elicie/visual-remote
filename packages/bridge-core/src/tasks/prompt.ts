@@ -7,6 +7,7 @@ import type {
 export interface AgentPromptOptions {
   repoRoot: string;
   workspaceRoot: string;
+  upstreamUrl?: string;
   contextBundlePath: string;
   context: ContextBundle;
   parent?: {
@@ -59,14 +60,17 @@ Follow-up context:
 - Previous diff summary: ${options.parent.diffSummary || "No file changes"}
 `
     : "";
-  return `You are editing the repository at: ${options.repoRoot}
-Workspace: ${options.workspaceRoot}
+  return `Target service context (authoritative):
+- Repository worktree: ${options.repoRoot}
+- Workspace: ${options.workspaceRoot}
+- Browser URL: ${options.context.page.url}
+${options.upstreamUrl ? `- Local upstream URL: ${options.upstreamUrl}\n` : ""}
+Treat the workspace above as the already-resolved service directory and the repository worktree as its safety boundary. Run project commands from the workspace; do not search parent directories or run directory-discovery commands to locate the project again.
 
 User request:
 ${options.context.request.text}
 
 Selected UI context:
-- URL: ${options.context.page.url}
 - Route: ${options.context.page.pathname}
 - Selection mode: ${options.context.selection.mode}
 ${targets || "- No concrete target; use the page context and repository search."}

@@ -176,6 +176,7 @@ describe("task control service", () => {
       status: "review",
       verificationStatus: "passed",
     });
+    expect(control.health()).toMatchObject({ activeTask: null });
     expect(control.getTaskFiles?.(created.id)).toEqual({ files: ["src/button.ts"] });
     expect(control.getTaskDiff?.(created.id)).toEqual({
       diff: expect.stringContaining("green"),

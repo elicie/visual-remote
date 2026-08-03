@@ -7,6 +7,7 @@ import {
 import {
   acquireWorktreeLock,
   createDefaultControlService,
+  createPairingUrl,
   discoverVisualDevConfigRoot,
   discoverGitWorktreeRoot,
   findAvailablePort,
@@ -23,6 +24,7 @@ import {
   type LoadedVisualDevConfig,
   type ManagedProcess,
   type WorktreeLock,
+  updateInstance,
   writeInstance,
 } from "@visual-remote/bridge-core";
 
@@ -236,6 +238,35 @@ async function startBridgeCore(
   let gateway: GatewayServer | undefined;
   let controlService: ControlService | undefined;
   let registryWritten = false;
+  let registryUpdate = Promise.resolve();
+  let latestRuntimeState: {
+    status: "idle" | "working";
+    activeTaskId?: string;
+  } = { status: "idle" };
+
+  const updateRuntimeState = (
+    status: "idle" | "working",
+    activeTaskId?: string,
+  ): void => {
+    latestRuntimeState = {
+      status,
+      ...(activeTaskId === undefined ? {} : { activeTaskId }),
+    };
+    if (!registryWritten) return;
+    registryUpdate = registryUpdate
+      .then(async () => {
+        await updateInstance(
+          loadedConfig.repoRoot,
+          process.pid,
+          {
+            status,
+            activeTaskId: activeTaskId ?? null,
+          },
+          { environment },
+        );
+      })
+      .catch(() => undefined);
+  };
 
   try {
     lock =
@@ -257,6 +288,9 @@ async function startBridgeCore(
       configRoot: loadedConfig.configRoot,
       workspaceRoot: loadedConfig.workspaceRoot,
       upstreamUrl: options.upstreamUrl,
+      onRuntimeState: (state) => {
+        updateRuntimeState(state.status, state.activeTaskId);
+      },
     };
     controlService = await resolveControlService(dependencies, controlContext);
     const allowedOrigins = new Set(loadedConfig.config.security.allowedOrigins);
@@ -271,15 +305,18 @@ async function startBridgeCore(
       allowedOrigins: [...allowedOrigins],
     });
     const address = await gateway.start();
-    const openUrl = publicUrl ?? address.url;
+    const openUrl = createPairingUrl(publicUrl ?? address.url, token);
     const instance: BridgeInstanceRecord = {
       projectId: loadedConfig.config.project.id,
       repoRoot: loadedConfig.repoRoot,
       pid: process.pid,
       gatewayUrl: address.url,
       upstreamUrl: options.upstreamUrl,
-      status: "idle",
+      status: latestRuntimeState.status,
       startedAt: new Date().toISOString(),
+      ...(latestRuntimeState.activeTaskId === undefined
+        ? {}
+        : { activeTaskId: latestRuntimeState.activeTaskId }),
       ...(publicUrl === undefined ? {} : { publicUrl }),
     };
     await writeInstance(loadedConfig.repoRoot, instance, { environment });
@@ -318,6 +355,13 @@ async function startBridgeCore(
         closePromise ??= (async () => {
           process.off("exit", emergencyExitCleanup);
           try {
+            await registryUpdate;
+            await updateInstance(
+              loadedConfig.repoRoot,
+              process.pid,
+              { status: "stopping", activeTaskId: null },
+              { environment },
+            );
             await Promise.allSettled([
               gateway?.close(),
               options.managedProcess?.stop(),

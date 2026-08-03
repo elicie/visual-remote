@@ -85,6 +85,15 @@ node apps/cli/dist/index.js doctor
 
 `doctor`에서 Git 작업 트리, 현재 프로젝트 설정과 Codex 실행 환경을 확인합니다.
 
+Codex 작업 중 `pwd`, 버전 확인, 파일 읽기·검색과 read-only Git 명령은 Bridge가
+등록한 구조화 도구로 실행합니다. 이 경로는 명령을 `argv` 배열과 등록된 workspace
+`cwd`로 전달하고 `shell: false`로 실행하며, 지원되는 명령은 RTK로 자동 압축합니다.
+직접 실행기는 명령별 읽기 전용 문법만 허용하고 경로·symlink를 Git worktree 안으로
+제한하며, 타임아웃 시 하위 프로세스까지 종료합니다. 명령 소요 시간, RTK 사용,
+출력 축약 여부와 Codex가 제공하는 토큰 사용량은 작업 로그에 함께 기록됩니다.
+파일 수정, 테스트·빌드 또는 파이프처럼 셸 문법이 필요한 작업만 Codex의 sandbox
+명령 실행기로 보냅니다.
+
 ## 자동화 셸에서 Node.js 24 사용
 
 비대화형 셸은 `.zshrc`를 읽지 않을 수 있으므로 NVM을 명시적으로 불러와야 합니다.
@@ -162,7 +171,13 @@ paths:
     - dist/**
 ```
 
+`project.workspace`, `paths.allowed`, `paths.denied`는 설정 파일이 가리키는 앱 workspace
+기준입니다. 모노레포의 `apps/web`에서 `init`했다면 `src/**`는
+`apps/web/src/**`로 안전하게 정규화되고 Codex의 기본 cwd도 `apps/web`이 됩니다.
+
 Vite 플러그인 또는 Next.js 설정 래퍼가 개발 서버와 함께 내부 Bridge를 시작합니다.
+`visual dev`가 Bridge를 먼저 소유한 경우 자식 Vite 플러그인은 runtime registry의
+gateway를 재사용하며, 개발 서버가 닫혀도 비소유 Bridge를 종료하지 않습니다.
 `agent`, `verification`, `paths` 같은 상세 설정만 YAML에서 조정하면 됩니다.
 
 ## 기존 attach 방식
@@ -180,7 +195,8 @@ npx --yes visual-remote@latest http://localhost:9011
 
 ## 브라우저에서 변경 요청
 
-1. 평소 사용하는 앱 주소를 엽니다.
+1. 개발 서버가 출력한 `Pair:` 주소를 엽니다. 토큰은 URL fragment에서 즉시 제거되고
+   현재 탭의 sessionStorage에만 보관됩니다.
 2. `Command+Shift+G` 또는 `Ctrl+Shift+G`로 오버레이를 열고 닫습니다.
 3. 전체 작업 내역을 보려면 `작업 보드 ↗`를 눌러 별도 탭을 엽니다.
 4. 변경을 요청하려면 요소 하나, 여러 요소, 영역 또는 페이지 전체를 선택합니다.
@@ -188,9 +204,10 @@ npx --yes visual-remote@latest http://localhost:9011
 6. 진행 단계, 로그, 변경 파일, 차이와 검증 결과를 확인합니다.
 7. 변경을 유지하거나, 최신 작업을 되돌리거나, 후속 요청을 보냅니다.
 
-진행 패널의 `작업 숨기기`를 누르면 작업은 백그라운드에서 계속되고 다른 요소를
-선택해 다음 요청을 추가할 수 있습니다. `작업 보기`로 패널을 복원하고, 작업이
-끝난 뒤에는 `닫기`로 패널만 치울 수 있습니다. 작업 내역은 작업 보드에 남습니다.
+진행 패널의 `작업 최소화`를 누르면 작업은 백그라운드에서 계속되고, 현재 단계와
+원래 요청 내용은 작은 진행 바로 남습니다. 다른 요소를 선택해 다음 요청을 추가할 수
+있으며 `작업 펼치기`로 전체 패널을 복원합니다. 작업이 끝난 뒤에는 `닫기`로
+패널만 치울 수 있고 작업 내역은 작업 보드에 남습니다.
 
 작업 보드는 새 작업과 상태·로그·diff를 WebSocket으로 자동 갱신합니다. 보드에는
 별도의 읽기 전용 세션 토큰만 전달되므로 작업 생성, 취소, 유지 또는 되돌리기 API를
@@ -238,6 +255,7 @@ corepack pnpm audit --prod
 - 단위 및 통합 테스트는 작업 큐, Git 스냅샷, Gateway, 에이전트와 검증 흐름을
   확인합니다.
 - 빌드는 브라우저 오버레이와 Node.js 명령줄 프로그램을 각각 생성합니다.
+- Pull request와 `main` push에서는 같은 테스트, 타입 검사와 빌드를 CI가 실행합니다.
 
 빌드 결과는 다음 위치에 생성됩니다.
 
@@ -248,6 +266,7 @@ apps/cli/dist/index.js
 apps/cli/dist/vite.js
 apps/cli/dist/next.js
 apps/cli/dist/next-client.js
+apps/cli/dist/direct-exec-mcp.js
 ```
 
 ## 저장소 구조

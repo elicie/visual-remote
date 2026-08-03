@@ -641,17 +641,6 @@ function targetSignalChanged(
   target: TargetContext,
   element: HTMLElement,
 ): boolean {
-  const currentRect = rectForElement(element);
-  const originalRect = target.dom.rect;
-  if (
-    Math.abs(currentRect.x - originalRect.x) > 1
-    || Math.abs(currentRect.y - originalRect.y) > 1
-    || Math.abs(currentRect.width - originalRect.width) > 1
-    || Math.abs(currentRect.height - originalRect.height) > 1
-  ) {
-    return true;
-  }
-
   if (
     target.dom.text !== undefined
     && compactText(element.innerText ?? "", 500) !== target.dom.text

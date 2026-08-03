@@ -37,7 +37,97 @@ function itemFiles(item: JsonRecord): string[] {
   return [...new Set(files)];
 }
 
-export function parseCodexJsonLine(line: string): NormalizedAgentEvent[] {
+function stringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+    ? value
+    : undefined;
+}
+
+function formatArgv(argv: readonly string[]): string {
+  return argv
+    .map((argument) =>
+      /^[A-Za-z0-9_./:=@%+,-]+$/u.test(argument)
+        ? argument
+        : JSON.stringify(argument))
+    .join(" ");
+}
+
+function isDirectExecItem(item: JsonRecord): boolean {
+  return (
+    item.type === "mcp_tool_call" &&
+    item.server === "visual_remote_exec" &&
+    item.tool === "run_readonly"
+  );
+}
+
+function directExecSummary(item: JsonRecord): string | undefined {
+  const arguments_ = asRecord(item.arguments);
+  const commands = Array.isArray(arguments_?.commands) ? arguments_.commands : [];
+  const summaries = commands.flatMap((candidate) => {
+    const command = asRecord(candidate);
+    const argv = stringArray(command?.argv);
+    return argv === undefined ? [] : [formatArgv(argv)];
+  });
+  return summaries.length === 0 ? undefined : summaries.join(" · ");
+}
+
+function directExecResults(
+  item: JsonRecord,
+  defaultCwd: string,
+): Array<{
+  command: string;
+  cwd: string;
+  ok: boolean;
+  exitCode?: number;
+  durationMs?: number;
+  usedRtk?: boolean;
+  timedOut?: boolean;
+  truncated?: boolean;
+}> {
+  const result = asRecord(item.result);
+  const structured = asRecord(result?.structured_content ?? result?.structuredContent);
+  const results = Array.isArray(structured?.results) ? structured.results : [];
+  return results.flatMap((candidate) => {
+    const command = asRecord(candidate);
+    const argv = stringArray(command?.argv);
+    if (argv === undefined) return [];
+    const exitCode = typeof command?.exitCode === "number" ? command.exitCode : undefined;
+    const durationMs = typeof command?.durationMs === "number" ? command.durationMs : undefined;
+    return [{
+      command: formatArgv(argv),
+      cwd: asText(command?.cwd) ?? defaultCwd,
+      ok: exitCode === 0,
+      ...(exitCode === undefined ? {} : { exitCode }),
+      ...(durationMs === undefined ? {} : { durationMs }),
+      ...(typeof command?.usedRtk === "boolean" ? { usedRtk: command.usedRtk } : {}),
+      ...(typeof command?.timedOut === "boolean" ? { timedOut: command.timedOut } : {}),
+      ...(typeof command?.truncated === "boolean" ? { truncated: command.truncated } : {}),
+    }];
+  });
+}
+
+function normalizedUsage(record: JsonRecord): NormalizedAgentEvent | undefined {
+  const result = asRecord(record.result);
+  const usage = asRecord(record.usage) ?? (result ? asRecord(result.usage) : undefined);
+  if (usage === undefined) return undefined;
+  const inputTokens = usage.input_tokens ?? usage.inputTokens;
+  const outputTokens = usage.output_tokens ?? usage.outputTokens;
+  const cachedInputTokens = usage.cached_input_tokens ?? usage.cachedInputTokens;
+  if (typeof inputTokens !== "number" || typeof outputTokens !== "number") {
+    return undefined;
+  }
+  return {
+    type: "usage",
+    inputTokens,
+    outputTokens,
+    ...(typeof cachedInputTokens === "number" ? { cachedInputTokens } : {}),
+  };
+}
+
+export function parseCodexJsonLine(
+  line: string,
+  defaultCwd = "",
+): NormalizedAgentEvent[] {
   const trimmed = line.trim();
   if (!trimmed) return [];
 
@@ -60,7 +150,12 @@ export function parseCodexJsonLine(line: string): NormalizedAgentEvent[] {
   if (type === "turn.completed") {
     const result = asRecord(record.result);
     const summary = asText(record.summary) ?? (result ? asText(result.summary) : undefined);
-    return [...events, summary ? { type: "complete", summary } : { type: "complete" }];
+    const usage = normalizedUsage(record);
+    return [
+      ...events,
+      ...(usage === undefined ? [] : [usage]),
+      summary ? { type: "complete", summary } : { type: "complete" },
+    ];
   }
   if (type === "turn.failed" || type === "error") {
     const error = asRecord(record.error);
@@ -74,10 +169,13 @@ export function parseCodexJsonLine(line: string): NormalizedAgentEvent[] {
   const item = asRecord(record.item);
   if (type === "item.started" && item) {
     const itemType = asText(item.type) ?? "item";
-    const summary = asText(item.command) ?? asText(item.text);
+    const directExec = isDirectExecItem(item);
+    const summary = directExec
+      ? directExecSummary(item)
+      : asText(item.command) ?? asText(item.text);
     const start: NormalizedAgentEvent = summary
-      ? { type: "tool_start", name: itemType, summary }
-      : { type: "tool_start", name: itemType };
+      ? { type: "tool_start", name: directExec ? "direct_exec" : itemType, summary }
+      : { type: "tool_start", name: directExec ? "direct_exec" : itemType };
     return [...events, start];
   }
 
@@ -93,13 +191,35 @@ export function parseCodexJsonLine(line: string): NormalizedAgentEvent[] {
         events.push({
           type: "command",
           command,
-          cwd: asText(item.cwd) ?? "",
+          cwd: asText(item.cwd) ?? defaultCwd,
         });
       }
     }
+    const directResults = isDirectExecItem(item)
+      ? directExecResults(item, defaultCwd)
+      : [];
+    for (const result of directResults) {
+      events.push({
+        type: "command",
+        command: result.command,
+        cwd: result.cwd,
+        ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
+        ...(result.durationMs === undefined ? {} : { durationMs: result.durationMs }),
+        ...(result.usedRtk === undefined ? {} : { usedRtk: result.usedRtk }),
+        ...(result.timedOut === undefined ? {} : { timedOut: result.timedOut }),
+        ...(result.truncated === undefined ? {} : { truncated: result.truncated }),
+      });
+    }
     for (const path of itemFiles(item)) events.push({ type: "file_hint", path });
     const exitCode = typeof item.exit_code === "number" ? item.exit_code : undefined;
-    events.push({ type: "tool_end", name: itemType, ok: exitCode === undefined || exitCode === 0 });
+    events.push({
+      type: "tool_end",
+      name: isDirectExecItem(item) ? "direct_exec" : itemType,
+      ok:
+        directResults.length > 0
+          ? directResults.every((result) => result.ok)
+          : exitCode === undefined || exitCode === 0,
+    });
     return events;
   }
 

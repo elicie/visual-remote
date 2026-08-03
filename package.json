@@ -14,6 +14,7 @@
   },
   "files": [
     "apps/cli/dist/index.js",
+    "apps/cli/dist/direct-exec-mcp.js",
     "apps/cli/dist/vite.js",
     "apps/cli/dist/next.js",
     "apps/cli/dist/next-client.js",

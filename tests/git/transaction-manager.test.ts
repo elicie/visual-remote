@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   GitTransactionManager,
+  PathPolicy,
   RevertConflictError,
+  rebaseWorkspacePatterns,
 } from "@visual-remote/bridge-core";
 import { createFixtureRepository } from "./helpers.js";
 
@@ -14,6 +16,29 @@ describe("GitTransactionManager", () => {
 
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map(async (path) => await rm(path, { recursive: true })));
+  });
+
+  it("rebases configured path patterns to a nested service workspace", () => {
+    const allowed = rebaseWorkspacePatterns(
+      "/repo",
+      "/repo/apps/web",
+      ["src/**", "package.json"],
+    );
+    const denied = rebaseWorkspacePatterns(
+      "/repo",
+      "/repo/apps/web",
+      [".env", "node_modules/**"],
+    );
+    const policy = new PathPolicy("/repo", { allowed, denied });
+
+    expect(allowed).toEqual([
+      "apps/web/src/**",
+      "apps/web/package.json",
+    ]);
+    expect(policy.allows("apps/web/src/App.tsx")).toBe(true);
+    expect(policy.allows("apps/web/package.json")).toBe(true);
+    expect(policy.allows("src/App.tsx")).toBe(false);
+    expect(policy.allows("apps/web/.env")).toBe(false);
   });
 
   it("isolates task changes from a dirty tracked and untracked baseline and reverts them", async () => {

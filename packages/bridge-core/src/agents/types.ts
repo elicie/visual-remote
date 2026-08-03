@@ -24,7 +24,22 @@ export type NormalizedAgentEvent =
   | { type: "phase"; name: string }
   | { type: "tool_start"; name: string; summary?: string }
   | { type: "tool_end"; name: string; ok: boolean }
-  | { type: "command"; command: string; cwd: string }
+  | {
+      type: "command";
+      command: string;
+      cwd: string;
+      exitCode?: number;
+      durationMs?: number;
+      usedRtk?: boolean;
+      timedOut?: boolean;
+      truncated?: boolean;
+    }
+  | {
+      type: "usage";
+      inputTokens: number;
+      outputTokens: number;
+      cachedInputTokens?: number;
+    }
   | { type: "file_hint"; path: string }
   | { type: "session"; sessionId: string }
   | { type: "warning"; text: string }

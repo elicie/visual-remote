@@ -108,6 +108,7 @@ export async function runDoctor(
       repoRoot,
     );
     const loaded = await loadVisualDevConfig(repoRoot, { configRoot });
+    const environment = dependencies.environment ?? process.env;
     checks.push({
       name: "config",
       status: loaded.loadedFiles.length === 0 ? "warning" : "pass",
@@ -137,7 +138,7 @@ export async function runDoctor(
         (await executableAvailable(
           executable,
           loaded.workspaceRoot,
-          dependencies.environment ?? process.env,
+          environment,
         ));
       checks.push({
         name: "dev-command",
@@ -147,6 +148,90 @@ export async function runDoctor(
           : `${executable ?? "<empty>"} was not found or is not executable.`,
       });
     }
+
+    const adapter = loaded.config.agent.adapter;
+    const adapterSupported = adapter === "codex";
+    const agentAvailable = await executableAvailable(
+      adapter,
+      loaded.workspaceRoot,
+      environment,
+    );
+    checks.push({
+      name: "agent",
+      status: adapterSupported && agentAvailable ? "pass" : "fail",
+      message: !adapterSupported
+        ? `${adapter} is configured but is not implemented in this build.`
+        : agentAvailable
+          ? `${adapter} is executable.`
+          : `${adapter} was not found or is not executable.`,
+    });
+
+    const rtkAvailable = await executableAvailable(
+      "rtk",
+      loaded.workspaceRoot,
+      environment,
+    );
+    checks.push({
+      name: "rtk",
+      status: rtkAvailable ? "pass" : "warning",
+      message: rtkAvailable
+        ? "rtk is available for token-efficient command output."
+        : "rtk was not found; agent commands will use their native output.",
+    });
+
+    const verificationCommands = loaded.config.verification.commands;
+    if (verificationCommands.length === 0) {
+      checks.push({
+        name: "verification",
+        status: "warning",
+        message: "No verification commands are configured.",
+      });
+    } else {
+      const availability = await Promise.all(
+        verificationCommands.map(async ({ command, name }) => ({
+          name,
+          available: await executableAvailable(
+            command[0] ?? "",
+            loaded.workspaceRoot,
+            environment,
+          ),
+        })),
+      );
+      const missing = availability
+        .filter(({ available }) => !available)
+        .map(({ name }) => name);
+      checks.push({
+        name: "verification",
+        status: missing.length === 0 ? "pass" : "fail",
+        message:
+          missing.length === 0
+            ? `${verificationCommands.length} verification command(s) are ready.`
+            : `Missing executable for: ${missing.join(", ")}.`,
+      });
+    }
+
+    const publicUrl = loaded.config.gateway.publicUrl;
+    checks.push({
+      name: "public-url",
+      status: publicUrl === undefined ? "warning" : "pass",
+      message:
+        publicUrl === undefined
+          ? "No gateway.publicUrl is configured; pairing links will use the local gateway URL."
+          : `Pairing links will use ${publicUrl}.`,
+    });
+
+    const allowedOrigins = loaded.config.security.allowedOrigins;
+    checks.push({
+      name: "allowed-origins",
+      status:
+        allowedOrigins.length > 0 || publicUrl !== undefined ? "pass" : "warning",
+      message:
+        allowedOrigins.length > 0
+          ? `${allowedOrigins.length} browser origin(s) are explicitly allowed.`
+          : publicUrl !== undefined
+            ? "The configured public URL origin will be allowed automatically."
+            : "No browser origins are configured; add security.allowedOrigins before remote access.",
+    });
   } catch (error) {
     checks.push({
       name: "config",

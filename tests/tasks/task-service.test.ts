@@ -106,6 +106,8 @@ describe("TaskService", () => {
     const adapter = new FakeAgentAdapter();
     const service = new TaskService({
       projectId: "fixture-project",
+      workspaceRoot: fixture.root,
+      upstreamUrl: "http://127.0.0.1:10010/",
       adapter,
       store: new SqliteTaskStore(":memory:"),
       git: await GitTransactionManager.open(fixture.root),
@@ -116,6 +118,12 @@ describe("TaskService", () => {
 
     const prompt = adapter.runs[0]?.input.prompt ?? "";
     expect(prompt).toContain("Runtime capabilities:");
+    expect(prompt).toContain(`Repository worktree: ${fixture.root}`);
+    expect(prompt).toContain(`Workspace: ${fixture.root}`);
+    expect(prompt).toContain("Browser URL: http://dev:10001/");
+    expect(prompt).toContain("Local upstream URL: http://127.0.0.1:10010/");
+    expect(prompt).toContain("already-resolved service directory");
+    expect(prompt).toContain("Run project commands from the workspace");
     expect(prompt).toContain("Direct browser or Parlane MCP control is not exposed");
     expect(prompt).toContain("Bridge performs its configured HMR and browser checks");
     await service.close();
