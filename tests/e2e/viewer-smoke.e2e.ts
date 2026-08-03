@@ -28,7 +28,9 @@ async function findTask(
   origin: string,
   requestText: string,
 ): Promise<ListedTask | undefined> {
-  const response = await request.get(`${origin}/_visual/api/tasks`);
+  const response = await request.get(`${origin}/_visual/api/tasks`, {
+    headers: { authorization: `Bearer ${controlToken}` },
+  });
   if (!response.ok()) {
     return undefined;
   }
@@ -174,7 +176,7 @@ test("standalone viewer covers bootstrap, live review, read-only access, and mob
   collectBrowserErrors(page);
   context.on("page", collectBrowserErrors);
 
-  await page.goto(fixture.origin);
+  await page.goto(`${fixture.origin}/#visual-pair=${controlToken}`);
   await page.keyboard.press("Control+Shift+G");
 
   const visualToolbar = page.getByRole("navigation", {
@@ -212,7 +214,11 @@ test("standalone viewer covers bootstrap, live review, read-only access, and mob
   await overlayRequest.fill(overlayRequestText);
   await page.getByRole("button", { name: "요청 보내기" }).click();
 
-  await page.getByRole("button", { name: "작업 숨기기" }).click();
+  await page.getByRole("button", { name: "작업 최소화" }).click();
+  const compactTask = page.getByRole("region", { name: "최소화된 작업 상태" });
+  await expect(compactTask).toBeVisible();
+  await expect(compactTask).toContainText("browser-fixture");
+  await expect(compactTask).toContainText(overlayRequestText);
   await page.getByRole("heading", { name: "Remote preview fixture" }).click();
   await expect(overlayRequest).toBeVisible();
   await expect(overlayRequest).toHaveValue("");
@@ -227,7 +233,8 @@ test("standalone viewer covers bootstrap, live review, read-only access, and mob
     })
     .toBe("review");
 
-  await page.getByRole("button", { name: "작업 보기" }).click();
+  await page.getByRole("button", { name: "작업 펼치기" }).click();
+  await expect(compactTask).toHaveCount(0);
   const taskStrip = page.getByRole("region", { name: "작업 진행과 검토" });
   await expect(taskStrip.getByRole("status")).toContainText("검토 대기");
   await page.getByRole("button", { name: "닫기" }).click();
@@ -239,6 +246,7 @@ test("standalone viewer covers bootstrap, live review, read-only access, and mob
 
   const revertedOverlayTask = await request.post(
     `${fixture.origin}/_visual/api/tasks/${overlayTaskId}/revert`,
+    { headers: { authorization: `Bearer ${controlToken}` } },
   );
   expect(revertedOverlayTask.ok()).toBe(true);
 
@@ -286,6 +294,7 @@ test("standalone viewer covers bootstrap, live review, read-only access, and mob
   });
 
   const created = await request.post(`${fixture.origin}/_visual/api/tasks`, {
+    headers: { authorization: `Bearer ${controlToken}` },
     data: taskPayload(fixture.origin, requestText),
   });
   expect(created.status()).toBe(201);

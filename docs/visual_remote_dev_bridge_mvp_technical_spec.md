@@ -1031,18 +1031,20 @@ interface BrowserSession {
 
 ### 12.2 브라우저 연결
 
-Bridge의 공개 주소를 직접 열면 Overlay가 별도 pairing token 없이 제어 채널에
-연결된다.
+Bridge가 시작될 때 터미널에 출력한 pairing 주소를 열면 Overlay가 제어 채널에
+연결된다. 공개 주소만 직접 연 브라우저에는 제어 권한을 부여하지 않는다.
 
 ```text
-https://admin.bridge.example/
+https://admin.bridge.example/#visual-pair=<token>
 ```
 
 브라우저 동작:
 
-1. 공개 주소를 연다.
-2. Overlay가 익명 control WebSocket을 연결한다.
-3. REST 제어 요청은 별도 Authorization header 없이 같은 origin으로 전송한다.
+1. 개발 서버가 출력한 pairing 주소를 연다.
+2. Overlay가 URL fragment의 token을 현재 탭의 sessionStorage에 보관하고 fragment를
+   제거한다.
+3. Overlay가 token으로 control WebSocket을 인증한다.
+4. REST 제어 요청은 같은 token을 Bearer Authorization header로 전송한다.
 
 독립 작업 보드는 Overlay가
 `GET /_visual/api/viewer-session`으로 호출마다 분리된 단기 viewer token과
@@ -1137,8 +1139,8 @@ WebSocket은 실시간 event와 command에 사용하고, 큰 artifact는 HTTP로
 | GET | `/_visual/api/artifacts/:id` | screenshot 등 artifact |
 | WS | `/_visual/ws` | 실시간 protocol |
 
-모든 제어 API는 Origin allowlist와 project ID 확인을 통과해야 한다. control
-요청에는 pairing token을 요구하지 않는다.
+모든 API와 WebSocket 연결은 Origin allowlist와 project ID 확인을 통과해야 한다.
+control 요청은 pairing token, 읽기 전용 요청은 유효한 viewer token을 요구한다.
 
 ---
 
@@ -1255,6 +1257,8 @@ CLI별 option이나 JSON output 형식은 빠르게 바뀔 수 있으므로 Brid
 - session ID 추출
 - cancel 시 process group 종료
 - 종료 code와 실패 원인 정규화
+- 등록 worktree 안의 읽기 전용 탐색은 임시 MCP 도구의 `argv` 배치로 직접 실행
+- 지원 명령은 RTK로 자동 변환하고, 셸 문법·변경 명령은 agent sandbox로 fallback
 
 ### 15.3 NormalizedAgentEvent
 
@@ -1739,6 +1743,8 @@ Bridge가 repository-specific process라고 해도 OS 수준에서 같은 사용
 - agent prompt의 destructive Git 명령 금지
 - HEAD/index 변화 감지
 - child process environment 최소화 및 로그 redaction
+- 직접 실행 도구는 `shell: false`, read-only allowlist, 최대 8개 명령, bounded output,
+  worktree 내부 realpath `cwd`만 허용
 - control API token 인증
 - Origin allowlist
 - Bridge는 `127.0.0.1`에만 bind
@@ -1981,7 +1987,7 @@ repo B gateway 4200 / upstream 44200
 - streaming HTML script injection
 - Overlay bundle serving
 - Shadow DOM toolbar
-- 익명 control WebSocket 연결
+- pairing token으로 인증한 control WebSocket 연결
 - browser session WebSocket
 
 완료 조건:
@@ -2129,7 +2135,7 @@ MVP release 전에 아래 항목을 모두 확인한다.
 | dirty tree task diff 분리 어려움 | temporary Git index + hidden before/after commit snapshot |
 | agent가 Git 명령을 수행함 | prompt 금지, HEAD/index guard, unsafe 상태 처리 |
 | agent가 repo 밖을 접근함 | path guard + CLI sandbox 설정, 향후 OS sandbox |
-| Portr URL이 외부에 노출됨 | 사용자가 승인한 익명 control 운영, Origin 검사, 공개 주소 관리 |
+| Portr URL이 외부에 노출됨 | 시작마다 회전하는 pairing token, Origin 검사, 공개 주소 관리 |
 | 여러 task가 같은 파일을 충돌 수정 | 저장소당 writer 1개와 queue |
 | Overlay가 app 조작을 방해함 | 비활성 시 pointer-events none, Shadow DOM, ignore subtree |
 | screenshot 실패 | best-effort artifact로 취급하고 DOM/source context를 기본으로 사용 |

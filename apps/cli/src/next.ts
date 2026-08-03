@@ -163,6 +163,7 @@ async function startOrReuseBridge(
       },
       { cwd },
     );
+    process.stderr.write(`[visual-remote] Pair: ${ownedBridge.openUrl}\n`);
     return { gatewayUrl: ownedBridge.gatewayUrl, ownedBridge };
   } catch (error) {
     if (!(error instanceof BridgeAlreadyRunningError)) throw error;

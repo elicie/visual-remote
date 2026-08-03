@@ -2,7 +2,7 @@ import { CodexAdapter } from "../agents/index.js";
 import { loadVisualDevConfig } from "../config/index.js";
 import { GitTransactionManager } from "../git/index.js";
 import { resolveStoragePaths, SqliteTaskStore } from "../storage/index.js";
-import { TaskService } from "../tasks/index.js";
+import { isActiveTaskStatus, TaskService } from "../tasks/index.js";
 import type { BridgeControlContext } from "./control-context.js";
 import type { ControlService } from "./control-service.js";
 import { createTaskControlService } from "./task-control-service.js";
@@ -29,6 +29,7 @@ export async function createDefaultControlService(
   const taskService = new TaskService({
     projectId: context.projectId,
     workspaceRoot: context.workspaceRoot,
+    upstreamUrl: context.upstreamUrl,
     adapter: new CodexAdapter(),
     store,
     git,
@@ -38,7 +39,7 @@ export async function createDefaultControlService(
     environment: {},
   });
 
-  return createTaskControlService({
+  const controlService = createTaskControlService({
     taskService,
     hmrWaitMs: loaded.config.verification.hmrWaitMs,
     verificationCommands: loaded.config.verification.commands,
@@ -50,4 +51,25 @@ export async function createDefaultControlService(
       upstreamUrl: context.upstreamUrl,
     },
   });
+  const reportRuntimeState = (): void => {
+    const activeTask = taskService
+      .list()
+      .find(
+        (task) => task.status === "queued" || isActiveTaskStatus(task.status),
+      );
+    context.onRuntimeState?.({
+      status: activeTask === undefined ? "idle" : "working",
+      ...(activeTask === undefined ? {} : { activeTaskId: activeTask.id }),
+    });
+  };
+  const unsubscribeRuntime = taskService.subscribe(reportRuntimeState);
+  reportRuntimeState();
+
+  return {
+    ...controlService,
+    close: async () => {
+      unsubscribeRuntime();
+      await controlService.close?.();
+    },
+  };
 }

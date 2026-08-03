@@ -11,10 +11,12 @@ import {
 } from "@visual-remote/overlay/helpers";
 import {
   BridgeConnection,
+  consumePairingToken,
   consumeViewerToken,
   fetchTaskArtifacts,
   fetchTasks,
   fetchViewerUrl,
+  logFromEvent,
   routeTaskEvent,
 } from "@visual-remote/overlay/bridge";
 import type { ServerEvent, TaskRecord } from "@visual-remote/protocol";
@@ -163,6 +165,33 @@ describe("pairing fragments", () => {
     expect(parsePairingFragment("#visual-view=read-token").token).toBeNull();
   });
 
+  it("stores a control pairing token for the current browser tab", () => {
+    const values = new Map<string, string>([
+      ["visual-bridge:pairing-token", "old-token"],
+      ["visual-bridge:last-sequence", "12"],
+    ]);
+    vi.stubGlobal("location", {
+      hash: "#visual-pair=new-token&panel=logs",
+      pathname: "/",
+      search: "",
+    });
+    const replaceState = vi.fn();
+    vi.stubGlobal("history", { state: null, replaceState });
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    });
+
+    expect(consumePairingToken()).toBe("new-token");
+    expect(values.get("visual-bridge:pairing-token")).toBe("new-token");
+    expect(values.has("visual-bridge:last-sequence")).toBe(false);
+    expect(replaceState).toHaveBeenCalledWith(null, "", "/#panel=logs");
+
+    vi.stubGlobal("location", { hash: "", pathname: "/", search: "" });
+    expect(consumePairingToken()).toBe("new-token");
+  });
+
   it("clears a stale viewer event sequence when the viewer token changes", () => {
     const values = new Map<string, string>([
       ["visual-bridge:viewer-token", "old-token"],
@@ -251,6 +280,53 @@ describe("task event routing", () => {
   });
 });
 
+describe("task log summaries", () => {
+  const event = (payload: unknown): ServerEvent => ({
+    seq: 1,
+    type: "task.agent_event",
+    projectId: "project",
+    taskId: "task-1",
+    payload,
+    createdAt: "2026-08-03T00:00:00.000Z",
+  });
+
+  it("shows the effective RTK command and cwd without shell-wrapper noise", () => {
+    expect(
+      logFromEvent(
+        event({
+          event: {
+            type: "command",
+            command: "/usr/bin/zsh -lc 'rtk git status --short'",
+            cwd: "/home/elicie/Dev/ai-canvas",
+          },
+        }),
+      ),
+    ).toBe("RTK · rtk git status --short · ai-canvas");
+    expect(
+      logFromEvent(
+        event({
+          event: {
+            type: "tool_start",
+            name: "command_execution",
+            summary: "/usr/bin/zsh -lc 'rtk git status --short'",
+          },
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      logFromEvent(
+        event({
+          event: {
+            type: "tool_start",
+            name: "direct_exec",
+            summary: "pwd · git status --short",
+          },
+        }),
+      ),
+    ).toBeNull();
+  });
+});
+
 describe("bridge event sequencing", () => {
   it("reports a sequence gap without delivering late duplicate events", () => {
     const values = new Map<string, string>([
@@ -308,16 +384,6 @@ describe("bridge event sequencing", () => {
 });
 
 describe("task history", () => {
-  it("loads task records without an authorization token", async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect(new Headers(init?.headers).has("Authorization")).toBe(false);
-      return new Response(JSON.stringify({ tasks: [] }), { status: 200 });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(fetchTasks("")).resolves.toEqual([]);
-  });
-
   it("loads valid task records with the pairing token", async () => {
     const task: TaskRecord = {
       id: "task-1",

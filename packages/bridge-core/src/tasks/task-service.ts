@@ -44,6 +44,7 @@ import {
 export interface TaskServiceOptions {
   projectId: string;
   workspaceRoot?: string;
+  upstreamUrl?: string;
   adapter: AgentAdapter;
   store: TaskStore;
   git: GitTransactionManager;
@@ -146,6 +147,7 @@ function repositoryGuardMessage(result: GuardVerification): string {
 export class TaskService {
   readonly #projectId: string;
   readonly #workspaceRoot: string;
+  readonly #upstreamUrl: string | undefined;
   readonly #adapter: AgentAdapter;
   readonly #store: TaskStore;
   readonly #git: GitTransactionManager;
@@ -173,6 +175,7 @@ export class TaskService {
   constructor(options: TaskServiceOptions) {
     this.#projectId = options.projectId;
     this.#workspaceRoot = resolve(options.workspaceRoot ?? options.git.repoRoot);
+    this.#upstreamUrl = options.upstreamUrl;
     if (!isWithin(options.git.repoRoot, this.#workspaceRoot)) {
       throw new TaskServiceError(
         "WORKSPACE_OUTSIDE_REPOSITORY",
@@ -611,6 +614,7 @@ export class TaskService {
       const prompt = buildAgentPrompt({
         repoRoot: this.#git.repoRoot,
         workspaceRoot: this.#workspaceRoot,
+        ...(this.#upstreamUrl === undefined ? {} : { upstreamUrl: this.#upstreamUrl }),
         contextBundlePath: contextPath,
         context,
         allowedPatterns: this.#git.pathPolicy.allowedPatterns,

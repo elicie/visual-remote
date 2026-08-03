@@ -10,10 +10,11 @@ import {
   formatBridgeSummary,
   runBridgeUntilSignal,
   startAttachBridge,
+  type BridgeControlContext,
   type RunningBridge,
 } from "@visual-remote/cli/bridge";
 import { formatDoctorChecks } from "@visual-remote/cli/doctor";
-import { getBridgeStatus } from "@visual-remote/cli/status";
+import { formatBridgeStatus, getBridgeStatus } from "@visual-remote/cli/status";
 import {
   acquireWorktreeLock,
   BridgeAlreadyRunningError,
@@ -76,6 +77,7 @@ describe("attach CLI lifecycle", () => {
       ...process.env,
       XDG_RUNTIME_DIR: runtimeDirectory,
     };
+    let runtimeContext: BridgeControlContext | undefined;
     const bridge = await startAttachBridge(
       {
         upstream: `http://127.0.0.1:${upstreamPort}`,
@@ -84,8 +86,14 @@ describe("attach CLI lifecycle", () => {
       {
         cwd: repoRoot,
         environment,
-        controlServiceFactory: (context) =>
-          createBasicControlService({ project: { id: context.projectId } }),
+        controlServiceFactory: (context) => {
+          runtimeContext = context;
+          context.onRuntimeState?.({
+            status: "working",
+            activeTaskId: "task-startup-fixture",
+          });
+          return createBasicControlService({ project: { id: context.projectId } });
+        },
       },
     );
 
@@ -93,18 +101,36 @@ describe("attach CLI lifecycle", () => {
       expect(Number(new URL(bridge.gatewayUrl).port)).toBeGreaterThanOrEqual(10_001);
       expect(new URL(bridge.gatewayUrl).hostname).toBe("localhost");
       expect(bridge.gateway.address()?.host).toBe("0.0.0.0");
-      expect(bridge.openUrl).toBe("https://portr.example.test/");
+      const openUrl = new URL(bridge.openUrl);
+      expect(openUrl.origin).toBe("https://portr.example.test");
+      expect(openUrl.hash).toMatch(/^#visual-pair=[A-Za-z0-9_-]+$/);
       expect(formatBridgeSummary(bridge)).toContain("Upstream:");
       expect(formatBridgeSummary(bridge)).toContain(
         "Public:   https://portr.example.test/",
       );
-      expect(formatBridgeSummary(bridge)).toContain(
-        "Open:     https://portr.example.test/",
-      );
+      expect(formatBridgeSummary(bridge)).toContain(`Open:     ${bridge.openUrl}`);
 
       const status = await getBridgeStatus({ cwd: repoRoot, environment });
       expect(status.running).toBe(true);
       expect(status.instance?.pid).toBe(process.pid);
+      expect(status.instance).toMatchObject({
+        status: "working",
+        activeTaskId: "task-startup-fixture",
+      });
+
+      runtimeContext?.onRuntimeState?.({
+        status: "working",
+        activeTaskId: "task-runtime-fixture",
+      });
+      await vi.waitFor(async () => {
+        expect(await readInstance(repoRoot, { environment })).toMatchObject({
+          status: "working",
+          activeTaskId: "task-runtime-fixture",
+        });
+      });
+      expect(formatBridgeStatus(await getBridgeStatus({ cwd: repoRoot, environment }))).toContain(
+        "Active:   task-runtime-fixture",
+      );
     } finally {
       await bridge.close();
       await close(upstream);

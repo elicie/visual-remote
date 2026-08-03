@@ -1,4 +1,7 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { AsyncQueue } from "./async-queue.js";
 import { parseCodexJsonLine } from "./codex-event-parser.js";
@@ -20,7 +23,11 @@ import {
 export interface CodexAdapterOptions {
   executable?: string;
   killGraceMs?: number;
+  rtkExecutable?: string | false;
+  directExecMcpScript?: string | false;
 }
+
+const execFileAsync = promisify(execFile);
 
 const INHERITED_ENVIRONMENT = [
   "PATH",
@@ -69,14 +76,83 @@ function splitLines(
   return remainder;
 }
 
+function defaultDirectExecMcpScript(): string | undefined {
+  const candidates = [
+    fileURLToPath(new URL("./direct-exec-mcp.js", import.meta.url)),
+    fileURLToPath(
+      new URL("../../../../apps/cli/dist/direct-exec-mcp.js", import.meta.url),
+    ),
+  ];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
 export class CodexAdapter implements AgentAdapter {
   readonly id = "codex";
   readonly #executable: string;
   readonly #killGraceMs: number;
+  readonly #rtkExecutable: string | false;
+  readonly #directExecMcpScript: string | undefined;
+  #rtkVersion: Promise<string | undefined> | undefined;
 
   constructor(options: CodexAdapterOptions = {}) {
     this.#executable = options.executable ?? "codex";
     this.#killGraceMs = options.killGraceMs ?? 2_000;
+    this.#rtkExecutable = options.rtkExecutable ?? "rtk";
+    this.#directExecMcpScript = options.directExecMcpScript === false
+      ? undefined
+      : options.directExecMcpScript ?? defaultDirectExecMcpScript();
+  }
+
+  #probeRtk(environment: NodeJS.ProcessEnv): Promise<string | undefined> {
+    if (this.#rtkExecutable === false) return Promise.resolve(undefined);
+    this.#rtkVersion ??= execFileAsync(this.#rtkExecutable, ["--version"], {
+      encoding: "utf8",
+      env: environment,
+      timeout: 1_000,
+      windowsHide: true,
+      maxBuffer: 16 * 1_024,
+    })
+      .then(({ stdout }) => stdout.trim().split(/\r?\n/, 1)[0] || undefined)
+      .catch(() => undefined);
+    return this.#rtkVersion;
+  }
+
+  async #runtimePrompt(
+    input: AgentRunInput,
+    environment: NodeJS.ProcessEnv,
+  ): Promise<string> {
+    const commandGuidance = this.#rtkExecutable === false
+      ? ""
+      : await this.#probeRtk(environment).then((version) => version
+        ? `RTK command proxy:\n- ${version} is installed and available in this runtime.\n- Prefix shell commands with RTK by default (for example: rtk git status, rtk rg <pattern>, rtk read <file>, rtk npm test).\n- Use the native command only when RTK has no suitable proxy or RTK execution fails. Do not spend time rediscovering or reinstalling RTK.`
+        : `RTK command proxy:\n- RTK was not detected in this runtime. Use native repository commands directly and do not spend time searching for RTK.`);
+    const directExecGuidance = this.#directExecMcpScript === undefined
+      ? ""
+      : `Direct read-only command runner:\n- Use the visual_remote_exec run_readonly MCP tool (mcp__visual_remote_exec__run_readonly) for repository inspection by default: pwd, version checks, file listing/reading/search, and read-only Git status/diff/log/show.\n- Send argv arrays, batch independent reads in one tool call, and keep cwd at the registered workspace unless a known subdirectory is required.\n- The tool executes without a shell and applies RTK automatically when supported.\n- Use command_execution only for edits, tests/builds, or commands that genuinely require shell syntax. Do not retry a policy-rejected command through another shell unless the requested work requires that non-read-only operation.`;
+    const guidance = [directExecGuidance, commandGuidance].filter(Boolean).join("\n\n");
+    return guidance.length === 0
+      ? input.prompt
+      : `${input.prompt.trimEnd()}\n\n${guidance}\n`;
+  }
+
+  #directExecConfig(input: AgentRunInput): string[] {
+    if (this.#directExecMcpScript === undefined) return [];
+    const serverArgs = [
+      this.#directExecMcpScript,
+      "--repo-root",
+      input.repoRoot,
+      "--workspace-root",
+      input.workspaceRoot,
+      ...(this.#rtkExecutable === false
+        ? ["--no-rtk"]
+        : ["--rtk", this.#rtkExecutable]),
+    ];
+    return [
+      "-c",
+      `mcp_servers.visual_remote_exec.command=${JSON.stringify(process.execPath)}`,
+      "-c",
+      `mcp_servers.visual_remote_exec.args=${JSON.stringify(serverArgs)}`,
+    ];
   }
 
   async probe(): Promise<AgentCapabilities> {
@@ -118,6 +194,7 @@ export class CodexAdapter implements AgentAdapter {
       "workspace-write",
       "-C",
       input.repoRoot,
+      ...this.#directExecConfig(input),
       "-",
     ];
     yield* this.#execute(input, signal, args);
@@ -139,6 +216,7 @@ export class CodexAdapter implements AgentAdapter {
       "workspace-write",
       "-C",
       input.repoRoot,
+      ...this.#directExecConfig(input),
       "resume",
       input.sessionId,
       "-",
@@ -152,9 +230,11 @@ export class CodexAdapter implements AgentAdapter {
     args: string[],
   ): AsyncIterable<NormalizedAgentEvent> {
     const queue = new AsyncQueue<NormalizedAgentEvent>();
+    const environment = processEnv(input.environment);
+    const prompt = await this.#runtimePrompt(input, environment);
     const child = spawn(this.#executable, args, {
       cwd: input.repoRoot,
-      env: processEnv(input.environment),
+      env: environment,
       detached: process.platform !== "win32",
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
@@ -188,7 +268,7 @@ export class CodexAdapter implements AgentAdapter {
 
     child.stdout.on("data", (chunk: Buffer | string) => {
       stdoutRemainder = splitLines(chunk, stdoutRemainder, (line) => {
-        for (const event of parseCodexJsonLine(line)) queue.push(event);
+        for (const event of parseCodexJsonLine(line, input.repoRoot)) queue.push(event);
       });
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
@@ -203,7 +283,9 @@ export class CodexAdapter implements AgentAdapter {
       void (async () => {
         await requestTermination();
         if (stdoutRemainder.trim()) {
-          for (const event of parseCodexJsonLine(stdoutRemainder)) queue.push(event);
+          for (const event of parseCodexJsonLine(stdoutRemainder, input.repoRoot)) {
+            queue.push(event);
+          }
         }
         if (stderrRemainder.trim()) queue.push({ type: "warning", text: stderrRemainder });
         if (timedOut) queue.end(new AgentTimeoutError());
@@ -225,7 +307,7 @@ export class CodexAdapter implements AgentAdapter {
     child.stdin.on("error", (error: NodeJS.ErrnoException) => {
       if (error.code !== "EPIPE") queue.end(error);
     });
-    child.stdin.end(input.prompt);
+    child.stdin.end(prompt);
 
     try {
       for await (const event of queue) yield event;

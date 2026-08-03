@@ -37,7 +37,63 @@ function itemFiles(item: JsonRecord): string[] {
   return [...new Set(files)];
 }
 
-export function parseCodexJsonLine(line: string): NormalizedAgentEvent[] {
+function stringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+    ? value
+    : undefined;
+}
+
+function formatArgv(argv: readonly string[]): string {
+  return argv
+    .map((argument) =>
+      /^[A-Za-z0-9_./:=@%+,-]+$/u.test(argument)
+        ? argument
+        : JSON.stringify(argument))
+    .join(" ");
+}
+
+function isDirectExecItem(item: JsonRecord): boolean {
+  return (
+    item.type === "mcp_tool_call" &&
+    item.server === "visual_remote_exec" &&
+    item.tool === "run_readonly"
+  );
+}
+
+function directExecSummary(item: JsonRecord): string | undefined {
+  const arguments_ = asRecord(item.arguments);
+  const commands = Array.isArray(arguments_?.commands) ? arguments_.commands : [];
+  const summaries = commands.flatMap((candidate) => {
+    const command = asRecord(candidate);
+    const argv = stringArray(command?.argv);
+    return argv === undefined ? [] : [formatArgv(argv)];
+  });
+  return summaries.length === 0 ? undefined : summaries.join(" · ");
+}
+
+function directExecResults(
+  item: JsonRecord,
+  defaultCwd: string,
+): Array<{ command: string; cwd: string; ok: boolean }> {
+  const result = asRecord(item.result);
+  const structured = asRecord(result?.structured_content ?? result?.structuredContent);
+  const results = Array.isArray(structured?.results) ? structured.results : [];
+  return results.flatMap((candidate) => {
+    const command = asRecord(candidate);
+    const argv = stringArray(command?.argv);
+    if (argv === undefined) return [];
+    return [{
+      command: formatArgv(argv),
+      cwd: asText(command?.cwd) ?? defaultCwd,
+      ok: command?.exitCode === 0,
+    }];
+  });
+}
+
+export function parseCodexJsonLine(
+  line: string,
+  defaultCwd = "",
+): NormalizedAgentEvent[] {
   const trimmed = line.trim();
   if (!trimmed) return [];
 
@@ -74,10 +130,13 @@ export function parseCodexJsonLine(line: string): NormalizedAgentEvent[] {
   const item = asRecord(record.item);
   if (type === "item.started" && item) {
     const itemType = asText(item.type) ?? "item";
-    const summary = asText(item.command) ?? asText(item.text);
+    const directExec = isDirectExecItem(item);
+    const summary = directExec
+      ? directExecSummary(item)
+      : asText(item.command) ?? asText(item.text);
     const start: NormalizedAgentEvent = summary
-      ? { type: "tool_start", name: itemType, summary }
-      : { type: "tool_start", name: itemType };
+      ? { type: "tool_start", name: directExec ? "direct_exec" : itemType, summary }
+      : { type: "tool_start", name: directExec ? "direct_exec" : itemType };
     return [...events, start];
   }
 
@@ -93,13 +152,30 @@ export function parseCodexJsonLine(line: string): NormalizedAgentEvent[] {
         events.push({
           type: "command",
           command,
-          cwd: asText(item.cwd) ?? "",
+          cwd: asText(item.cwd) ?? defaultCwd,
         });
       }
     }
+    const directResults = isDirectExecItem(item)
+      ? directExecResults(item, defaultCwd)
+      : [];
+    for (const result of directResults) {
+      events.push({
+        type: "command",
+        command: result.command,
+        cwd: result.cwd,
+      });
+    }
     for (const path of itemFiles(item)) events.push({ type: "file_hint", path });
     const exitCode = typeof item.exit_code === "number" ? item.exit_code : undefined;
-    events.push({ type: "tool_end", name: itemType, ok: exitCode === undefined || exitCode === 0 });
+    events.push({
+      type: "tool_end",
+      name: isDirectExecItem(item) ? "direct_exec" : itemType,
+      ok:
+        directResults.length > 0
+          ? directResults.every((result) => result.ok)
+          : exitCode === undefined || exitCode === 0,
+    });
     return events;
   }
 

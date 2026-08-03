@@ -215,8 +215,8 @@ describe("Gateway server", () => {
     expect(await viewerHead.text()).toBe("");
 
     const anonymous = await fetch(`${url}/_visual/api/health`);
-    expect(anonymous.status).toBe(200);
-    expect(await anonymous.json()).toEqual({ status: "ok" });
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.headers.get("www-authenticate")).toBe("Bearer");
 
     const headers = {
       authorization: "Bearer fixture-token",
@@ -225,7 +225,9 @@ describe("Gateway server", () => {
     const project = await fetch(`${url}/_visual/api/project`, { headers });
     expect(await project.json()).toEqual({ id: "fixture" });
 
-    const viewerSession = await fetch(`${url}/_visual/api/viewer-session`);
+    const viewerSession = await fetch(`${url}/_visual/api/viewer-session`, {
+      headers,
+    });
     const firstViewerSession = await viewerSession.json();
     expect(firstViewerSession).toEqual({
       viewerUrl: "/_visual/viewer#visual-view=fixture-viewer-token",
@@ -302,7 +304,7 @@ describe("Gateway server", () => {
     expect(missing.status).toBe(404);
   });
 
-  it("preserves upstream HMR WebSockets and accepts anonymous control WebSockets", async () => {
+  it("preserves upstream HMR WebSockets and authenticates control WebSockets", async () => {
     let controlConnection: AuthenticatedControlSocket | undefined;
     let viewerConnection: AuthenticatedControlSocket | undefined;
     const url = await startGateway({
@@ -338,7 +340,7 @@ describe("Gateway server", () => {
         id: "auth-1",
         type: "auth",
         browserSessionId: "00000000-0000-4000-8000-000000000001",
-        payload: { token: "" },
+        payload: { token: "fixture-token" },
       }),
     );
     expect(await authenticated).toEqual({
@@ -376,6 +378,23 @@ describe("Gateway server", () => {
     });
     expect(viewerConnection?.projectId).toBe("fixture");
     viewerControl.close();
+
+    const anonymousControl = await openWebSocket(
+      `${wsUrl}/_visual/ws`,
+      "https://allowed.example",
+    );
+    const anonymousClosed = nextClose(anonymousControl);
+    anonymousControl.send(
+      JSON.stringify({
+        id: "auth-anonymous",
+        type: "auth",
+        payload: { token: "" },
+      }),
+    );
+    await expect(anonymousClosed).resolves.toEqual({
+      code: 4401,
+      reason: "Invalid viewer token",
+    });
   });
 
   it("rejects expired viewer sessions for REST and new WebSocket authentication", async () => {

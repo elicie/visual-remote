@@ -38,11 +38,15 @@ export const overlayStyles = String.raw`
 
   .visual-shell[data-open="false"] {
     pointer-events: none;
+  }
+
+  .visual-shell[data-open="false"] > :not(.task-compact):not(.visually-hidden) {
     visibility: hidden;
   }
 
   .visual-shell[data-open="true"] .toolbar,
-  .visual-shell[data-open="true"] .strip {
+  .visual-shell[data-open="true"] .strip,
+  .task-compact {
     pointer-events: auto;
   }
 
@@ -147,6 +151,104 @@ export const overlayStyles = String.raw`
 
   .connection-label-compact {
     display: none;
+  }
+
+  .task-compact {
+    position: fixed;
+    top: max(62px, calc(env(safe-area-inset-top) + 50px));
+    right: 12px;
+    z-index: 4;
+    display: flex;
+    width: min(360px, calc(100vw - 24px));
+    min-height: 48px;
+    overflow: hidden;
+    background: var(--strip);
+    border: 1px solid #272821;
+    border-radius: 4px 4px 11px 4px;
+    box-shadow: 0 5px 18px rgb(0 0 0 / 28%);
+    color: var(--ink);
+  }
+
+  .task-compact::after {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 2px;
+    content: "";
+    background: var(--verified);
+  }
+
+  .task-compact[data-active="true"]::after {
+    width: 36%;
+    background: var(--dispatch);
+    animation: task-route 1.25s cubic-bezier(.16, 1, .3, 1) infinite;
+  }
+
+  .task-compact[data-error="true"]::after {
+    width: 100%;
+    background: var(--danger);
+    animation: none;
+  }
+
+  .task-compact-main {
+    display: grid;
+    flex: 1;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    min-height: 48px;
+    padding: 6px 9px 7px 10px;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .task-compact-main:hover {
+    background: var(--strip-strong);
+  }
+
+  .task-compact-copy {
+    display: grid;
+    min-width: 0;
+  }
+
+  .task-compact-copy strong,
+  .task-compact-copy > span:last-child,
+  .task-compact-project {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .task-compact-copy strong {
+    font-size: 12px;
+  }
+
+  .task-compact-copy > span:last-child,
+  .task-compact-project,
+  .task-compact-code {
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  .task-compact-cancel {
+    align-self: stretch;
+    min-width: 52px;
+    padding: 0 9px;
+    border: 0;
+    border-left: 1px solid var(--rule);
+    background: transparent;
+    color: var(--danger);
+    cursor: pointer;
+    font-weight: 650;
+  }
+
+  .task-compact-cancel:hover {
+    background: #f7dfdb;
   }
 
   .state-dot {
@@ -713,7 +815,14 @@ export const overlayStyles = String.raw`
     .toolbar button,
     .toolbar a {
       min-width: 46px;
-      min-height: 40px;
+      min-height: 44px;
+    }
+
+    .task-compact {
+      top: max(66px, calc(env(safe-area-inset-top) + 58px));
+      right: 8px;
+      left: 8px;
+      width: auto;
     }
 
     .connection {

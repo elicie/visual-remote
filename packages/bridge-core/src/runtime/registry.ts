@@ -38,6 +38,11 @@ export interface BridgeInstanceRecord {
   activeTaskId?: string;
 }
 
+export interface BridgeInstanceUpdate {
+  status?: BridgeInstanceStatus;
+  activeTaskId?: string | null;
+}
+
 interface LockRecord {
   ownerId: string;
   pid: number;
@@ -204,6 +209,27 @@ export async function writeInstance(
     mode: 0o600,
   });
   await rename(temporaryPath, path);
+}
+
+export async function updateInstance(
+  repositoryRoot: string,
+  expectedPid: number,
+  update: BridgeInstanceUpdate,
+  options: RuntimePathOptions = {},
+): Promise<BridgeInstanceRecord | undefined> {
+  const current = await readInstance(repositoryRoot, options);
+  if (current === undefined || current.pid !== expectedPid) return undefined;
+  const next: BridgeInstanceRecord = {
+    ...current,
+    ...(update.status === undefined ? {} : { status: update.status }),
+  };
+  if (update.activeTaskId === null) {
+    delete next.activeTaskId;
+  } else if (update.activeTaskId !== undefined) {
+    next.activeTaskId = update.activeTaskId;
+  }
+  await writeInstance(repositoryRoot, next, options);
+  return next;
 }
 
 export async function removeInstance(

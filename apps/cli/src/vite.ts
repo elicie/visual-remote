@@ -24,6 +24,7 @@ function upstreamUrl(config: UserConfig): string {
 
 export function visualRemote(options: VisualRemoteViteOptions = {}): Plugin {
   let bridgePromise: Promise<RunningBridge> | undefined;
+  let pairingUrlAnnounced = false;
 
   const closeBridge = async (): Promise<void> => {
     if (bridgePromise === undefined) return;
@@ -77,6 +78,12 @@ export function visualRemote(options: VisualRemoteViteOptions = {}): Plugin {
       },
     },
     configureServer(server) {
+      if (!pairingUrlAnnounced && bridgePromise !== undefined) {
+        pairingUrlAnnounced = true;
+        void bridgePromise.then((bridge) => {
+          server.config.logger.info(`[visual-remote] Pair: ${bridge.openUrl}`);
+        });
+      }
       server.httpServer?.once("close", () => {
         void closeBridge();
       });

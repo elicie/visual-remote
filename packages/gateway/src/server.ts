@@ -156,7 +156,7 @@ function tokenAccess(
   viewerSessions: Map<string, number>,
   now: number,
 ): AccessLevel | undefined {
-  if (token === undefined || token.length === 0) return "control";
+  if (token === undefined || token.length === 0) return undefined;
   if (pairingTokensMatch(controlToken, token)) return "control";
   const expiresAt = viewerSessions.get(token);
   if (expiresAt !== undefined) {
@@ -645,7 +645,12 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
         const access = requestAccess(request, options.pairingToken, viewerSessions);
         if (access === undefined) {
           response.setHeader("www-authenticate", "Bearer");
-          writeApiError(response, 401, "unauthorized", "A valid viewer token is required");
+          writeApiError(
+            response,
+            401,
+            "unauthorized",
+            "A valid control or viewer token is required",
+          );
           return;
         }
 
