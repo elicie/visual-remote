@@ -635,13 +635,11 @@ function TaskStrip({
 
 function TaskCompactStrip({
   task,
-  projectId,
   busyAction,
   onExpand,
   onCancel,
 }: {
   task: TaskView;
-  projectId: string;
   busyAction: boolean;
   onExpand: () => void;
   onCancel: () => void;
@@ -649,6 +647,9 @@ function TaskCompactStrip({
   const active = ACTIVE_PHASES.has(task.status);
   const terminal = ["review", "accepted", "reverted"].includes(task.status);
   const error = ERROR_PHASES.has(task.status) || task.verification === "failed";
+  const phaseId = "visual-task-compact-phase";
+  const requestId = "visual-task-compact-request";
+  const actionId = "visual-task-compact-action";
   return (
     <section
       class="task-compact"
@@ -659,7 +660,7 @@ function TaskCompactStrip({
       <button
         type="button"
         class="task-compact-main"
-        aria-label={`${PHASE_LABELS[task.status]} 작업 상세 펼치기`}
+        aria-labelledby={`${phaseId} ${requestId} ${actionId}`}
         onClick={onExpand}
       >
         <span
@@ -670,12 +671,13 @@ function TaskCompactStrip({
           aria-hidden="true"
         />
         <span class="task-compact-copy">
-          <span class="task-compact-project machine">{projectId}</span>
-          <strong>{PHASE_LABELS[task.status]}</strong>
-          <span>{compactText(task.requestText, 96)}</span>
-        </span>
-        <span class="task-compact-code machine">
-          {task.id ? task.id.slice(0, 8) : "QUEUE"}
+          <strong id={phaseId}>{PHASE_LABELS[task.status]}</strong>
+          <span id={requestId} class="task-compact-request">
+            {task.requestText}
+          </span>
+          <span id={actionId} class="visually-hidden">
+            작업 상세 펼치기
+          </span>
         </span>
       </button>
       {active ? (
@@ -1750,7 +1752,6 @@ function Overlay({ host }: { host: HTMLElement }) {
       {task && taskPanelHidden ? (
         <TaskCompactStrip
           task={task}
-          projectId={projectId}
           busyAction={busyAction}
           onExpand={() => setTaskPanelHidden(false)}
           onCancel={() => void runTaskAction("cancel")}

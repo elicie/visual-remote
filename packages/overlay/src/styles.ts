@@ -194,7 +194,7 @@ export const overlayStyles = String.raw`
   .task-compact-main {
     display: grid;
     flex: 1;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
     gap: 8px;
     min-width: 0;
@@ -213,12 +213,12 @@ export const overlayStyles = String.raw`
 
   .task-compact-copy {
     display: grid;
+    gap: 1px;
     min-width: 0;
   }
 
   .task-compact-copy strong,
-  .task-compact-copy > span:last-child,
-  .task-compact-project {
+  .task-compact-request {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -228,11 +228,10 @@ export const overlayStyles = String.raw`
     font-size: 12px;
   }
 
-  .task-compact-copy > span:last-child,
-  .task-compact-project,
-  .task-compact-code {
+  .task-compact-request {
     color: var(--muted);
-    font-size: 10px;
+    font-size: 12px;
+    line-height: 1.35;
   }
 
   .task-compact-cancel {

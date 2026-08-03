@@ -217,8 +217,13 @@ test("standalone viewer covers bootstrap, live review, read-only access, and mob
   await page.getByRole("button", { name: "작업 최소화" }).click();
   const compactTask = page.getByRole("region", { name: "최소화된 작업 상태" });
   await expect(compactTask).toBeVisible();
-  await expect(compactTask).toContainText("browser-fixture");
   await expect(compactTask).toContainText(overlayRequestText);
+  await expect(compactTask).not.toContainText("browser-fixture");
+  await expect(
+    compactTask.getByRole("button", {
+      name: new RegExp(`${overlayRequestText} 작업 상세 펼치기`),
+    }),
+  ).toBeVisible();
   await page.getByRole("heading", { name: "Remote preview fixture" }).click();
   await expect(overlayRequest).toBeVisible();
   await expect(overlayRequest).toHaveValue("");
