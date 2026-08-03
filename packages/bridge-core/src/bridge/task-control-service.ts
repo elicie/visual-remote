@@ -5,6 +5,7 @@ import {
   contextBundleSchema,
   type ClientMessage,
   type ContextBundle,
+  type ServerEvent,
   type TaskRecord,
 } from "@visual-remote/protocol";
 import {
@@ -116,6 +117,8 @@ function send(socket: WebSocket, value: unknown): void {
     socket.send(JSON.stringify(value));
   }
 }
+
+const MAX_BUFFERED_VIEWER_EVENTS = 1_000;
 
 function rawText(data: RawData): string {
   if (typeof data === "string") {
@@ -563,7 +566,21 @@ export function createTaskControlService(
   const connectViewerWebSocket = ({
     socket,
   }: AuthenticatedControlSocket): (() => void) => {
-    const unsubscribe = taskService.subscribe((event) => send(socket, event));
+    let synchronized = false;
+    const bufferedEvents = new Map<number, ServerEvent>();
+    const unsubscribe = taskService.subscribe((event) => {
+      if (synchronized) {
+        send(socket, event);
+        return;
+      }
+      bufferedEvents.set(event.seq, event);
+      if (bufferedEvents.size > MAX_BUFFERED_VIEWER_EVENTS) {
+        const oldestSequence = bufferedEvents.keys().next().value;
+        if (typeof oldestSequence === "number") {
+          bufferedEvents.delete(oldestSequence);
+        }
+      }
+    });
 
     const handleMessage = (data: RawData) => {
       const message = parseClientMessage(data);
@@ -585,12 +602,29 @@ export function createTaskControlService(
         return;
       }
 
-      const payload = recordOf(message.payload);
-      if (typeof payload?.lastSeq !== "number" || !Number.isFinite(payload.lastSeq)) {
+      if (synchronized) {
         return;
       }
-      const lastSeq = Math.max(0, Math.floor(payload.lastSeq));
-      for (const event of taskService.replay(lastSeq)) {
+
+      const payload = recordOf(message.payload);
+      const lastSeq =
+        typeof payload?.lastSeq === "number" && Number.isFinite(payload.lastSeq)
+          ? Math.max(0, Math.floor(payload.lastSeq))
+          : undefined;
+      const events = new Map<number, ServerEvent>();
+      if (lastSeq !== undefined) {
+        for (const event of taskService.replay(lastSeq)) {
+          events.set(event.seq, event);
+        }
+      }
+      for (const event of bufferedEvents.values()) {
+        if (lastSeq === undefined || event.seq > lastSeq) {
+          events.set(event.seq, event);
+        }
+      }
+      bufferedEvents.clear();
+      synchronized = true;
+      for (const event of [...events.values()].sort((left, right) => left.seq - right.seq)) {
         send(socket, event);
       }
     };

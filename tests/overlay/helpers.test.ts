@@ -10,6 +10,7 @@ import {
   shouldSubmitOnEnter,
 } from "@visual-remote/overlay/helpers";
 import {
+  BridgeConnection,
   consumeViewerToken,
   fetchTaskArtifacts,
   fetchTasks,
@@ -21,7 +22,52 @@ import type { ServerEvent, TaskRecord } from "@visual-remote/protocol";
 const BROWSER_A = "00000000-0000-4000-8000-000000000001";
 const BROWSER_B = "00000000-0000-4000-8000-000000000002";
 
+class FakeBrowserSocket {
+  static readonly OPEN = 1;
+  static readonly instances: FakeBrowserSocket[] = [];
+
+  readonly OPEN = FakeBrowserSocket.OPEN;
+  readonly sent: string[] = [];
+  readyState = 0;
+  private readonly listeners = new Map<string, Array<(event: unknown) => void>>();
+
+  constructor(readonly url: string) {
+    FakeBrowserSocket.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: (event: unknown) => void): void {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  send(value: string): void {
+    this.sent.push(value);
+  }
+
+  close(code = 1_000): void {
+    this.readyState = 3;
+    this.emit("close", { code });
+  }
+
+  open(): void {
+    this.readyState = FakeBrowserSocket.OPEN;
+    this.emit("open", {});
+  }
+
+  receive(value: unknown): void {
+    this.emit("message", { data: JSON.stringify(value) });
+  }
+
+  private emit(type: string, event: unknown): void {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(event);
+    }
+  }
+}
+
 afterEach(() => {
+  FakeBrowserSocket.instances.length = 0;
   vi.unstubAllGlobals();
 });
 
@@ -205,7 +251,73 @@ describe("task event routing", () => {
   });
 });
 
+describe("bridge event sequencing", () => {
+  it("reports a sequence gap without delivering late duplicate events", () => {
+    const values = new Map<string, string>([
+      ["visual-bridge:viewer-last-sequence", "5"],
+    ]);
+    vi.stubGlobal("location", {
+      href: "http://dev:10001/_visual/viewer",
+      protocol: "http:",
+    });
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    });
+    vi.stubGlobal("WebSocket", FakeBrowserSocket);
+
+    const received: ServerEvent[] = [];
+    const gaps: Array<{ expectedSequence: number; receivedSequence: number }> = [];
+    const connection = new BridgeConnection({
+      token: "viewer-token",
+      browserSessionId: BROWSER_A,
+      mode: "viewer",
+      onSnapshot: () => {},
+      onEvent: (event) => received.push(event),
+      onSequenceGap: (gap) => gaps.push(gap),
+    });
+    connection.connect();
+
+    const socket = FakeBrowserSocket.instances[0];
+    expect(socket).toBeDefined();
+    socket?.open();
+    socket?.receive({ type: "auth.ok", projectId: "project" });
+    expect(socket?.sent.map((value) => JSON.parse(value))).toEqual([
+      expect.objectContaining({ type: "auth", payload: { token: "viewer-token" } }),
+      expect.objectContaining({ type: "browser.hello", payload: { lastSeq: 5 } }),
+    ]);
+
+    const event = (seq: number): ServerEvent => ({
+      seq,
+      type: "task.phase_changed",
+      projectId: "project",
+      taskId: "task-1",
+      payload: {},
+      createdAt: "2026-08-02T00:00:00.000Z",
+    });
+    socket?.receive(event(6));
+    socket?.receive(event(8));
+    socket?.receive(event(7));
+
+    expect(gaps).toEqual([{ expectedSequence: 7, receivedSequence: 8 }]);
+    expect(received.map((item) => item.seq)).toEqual([6, 8]);
+    expect(values.get("visual-bridge:viewer-last-sequence")).toBe("8");
+    connection.close();
+  });
+});
+
 describe("task history", () => {
+  it("loads task records without an authorization token", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Headers(init?.headers).has("Authorization")).toBe(false);
+      return new Response(JSON.stringify({ tasks: [] }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchTasks("")).resolves.toEqual([]);
+  });
+
   it("loads valid task records with the pairing token", async () => {
     const task: TaskRecord = {
       id: "task-1",

@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
   createTaskControlService,
@@ -81,6 +82,7 @@ const gitManager = await GitTransactionManager.open(repoRoot, {
   allowed: ["src/**"],
 });
 const adapter = new FakeAgentAdapter(async () => {
+  await delay(350);
   await writeFile(
     join(repoRoot, "src", "screen.ts"),
     "export const buttonTone = 'green';\n",
@@ -120,7 +122,7 @@ const gateway = createGatewayServer({
 await gateway.start();
 
 process.stdout.write(
-  `Browser fixture ready: http://127.0.0.1:${gatewayPort}/#visual-pair=${pairingToken}\n`,
+  `Browser fixture ready: http://127.0.0.1:${gatewayPort}/\n`,
 );
 
 let closing = false;

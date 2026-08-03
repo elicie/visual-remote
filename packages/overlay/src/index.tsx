@@ -373,6 +373,7 @@ function TaskStrip({
   onFollowUpText,
   onFollowUp,
   onNewRequest,
+  onDismiss,
 }: {
   panelRef: preact.RefObject<HTMLDivElement>;
   position: PopoverPosition;
@@ -388,6 +389,7 @@ function TaskStrip({
   onFollowUpText: (value: string) => void;
   onFollowUp: () => void;
   onNewRequest: () => void;
+  onDismiss: () => void;
 }) {
   const active = ACTIVE_PHASES.has(task.status);
   const hasChanges = task.changedFiles.length > 0 || Boolean(task.diff);
@@ -433,6 +435,7 @@ function TaskStrip({
 
   return (
     <section
+      id="visual-task-strip"
       ref={panelRef}
       class="strip"
       style={{ left: `${position.left}px`, top: `${position.top}px` }}
@@ -567,6 +570,16 @@ function TaskStrip({
               새 요청
             </button>
           ) : null}
+          {!active ? (
+            <button
+              type="button"
+              class="quiet"
+              title="작업 내역은 작업 보드에 남기고 이 패널만 닫기"
+              onClick={onDismiss}
+            >
+              닫기
+            </button>
+          ) : null}
         </div>
 
         {followUpOpen && reviewable ? (
@@ -634,13 +647,14 @@ function Overlay({ host }: { host: HTMLElement }) {
   const [renderRevision, setRenderRevision] = useState(1);
   const [geometryRevision, setGeometryRevision] = useState(0);
   const [connection, setConnection] = useState<ConnectionSnapshot>({
-    state: token ? "connecting" : "unpaired",
+    state: "connecting",
     lastSequence: 0,
   });
   const [projectId, setProjectId] = useState("current");
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [viewerUrlFailed, setViewerUrlFailed] = useState(false);
   const [task, setTask] = useState<TaskView | null>(null);
+  const [taskPanelHidden, setTaskPanelHidden] = useState(false);
   const [followUpOpen, setFollowUpOpen] = useState(false);
   const [followUpText, setFollowUpText] = useState("");
   const [busyAction, setBusyAction] = useState(false);
@@ -668,9 +682,6 @@ function Overlay({ host }: { host: HTMLElement }) {
 
   const loadArtifacts = useCallback(
     async (taskId: string) => {
-      if (!token) {
-        return;
-      }
       const artifacts = await fetchTaskArtifacts(token, taskId);
       setTask((current) =>
         current?.id === taskId
@@ -798,10 +809,6 @@ function Overlay({ host }: { host: HTMLElement }) {
   );
 
   useEffect(() => {
-    if (!token) {
-      return;
-    }
-
     const bridge = new BridgeConnection({
       token,
       browserSessionId,
@@ -860,10 +867,6 @@ function Overlay({ host }: { host: HTMLElement }) {
 
   useEffect(() => {
     let active = true;
-    if (!token) {
-      setViewerUrl(null);
-      return;
-    }
     setViewerUrlFailed(false);
     void fetchViewerUrl(token)
       .then((url) => {
@@ -1067,7 +1070,7 @@ function Overlay({ host }: { host: HTMLElement }) {
   const chooseMode = useCallback(
     (nextMode: SelectionMode) => {
       resetSelection();
-      setTask(null);
+      setTaskPanelHidden(Boolean(task));
       setMode(nextMode);
       setScope(nextMode === "page" ? "page" : "instance");
       if (nextMode === "page") {
@@ -1075,7 +1078,7 @@ function Overlay({ host }: { host: HTMLElement }) {
         setRequestOpen(true);
       }
     },
-    [captureElements, resetSelection],
+    [captureElements, resetSelection, task],
   );
 
   useEffect(() => {
@@ -1096,7 +1099,7 @@ function Overlay({ host }: { host: HTMLElement }) {
       }
 
       if (event.key === "Escape") {
-        if (requestOpen && !task) {
+        if (requestOpen) {
           resetSelection();
         } else {
           setOpen(false);
@@ -1106,6 +1109,7 @@ function Overlay({ host }: { host: HTMLElement }) {
         mode === "multi" &&
         selectedRef.current.length > 0 &&
         !requestOpen &&
+        (!task || taskPanelHidden) &&
         !eventIsFromOverlay(event)
       ) {
         event.preventDefault();
@@ -1115,10 +1119,16 @@ function Overlay({ host }: { host: HTMLElement }) {
 
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [mode, open, requestOpen, resetSelection, task]);
+  }, [mode, open, requestOpen, resetSelection, task, taskPanelHidden]);
 
   useEffect(() => {
-    if (!open || requestOpen || task || !token) {
+    if (
+      !open
+      || requestOpen
+      || Boolean(
+        task && ACTIVE_PHASES.has(task.status) && !taskPanelHidden,
+      )
+    ) {
       setHovered(null);
       return;
     }
@@ -1194,6 +1204,8 @@ function Overlay({ host }: { host: HTMLElement }) {
       event.preventDefault();
       event.stopImmediatePropagation();
 
+      setTaskPanelHidden(Boolean(task));
+
       const multi = mode === "multi" || event.shiftKey;
       if (!multi) {
         captureElements([target]);
@@ -1238,7 +1250,7 @@ function Overlay({ host }: { host: HTMLElement }) {
       document.removeEventListener("pointerup", onPointerUp, true);
       document.removeEventListener("click", onClick, true);
     };
-  }, [captureElements, mode, open, requestOpen, task, token]);
+  }, [captureElements, mode, open, requestOpen, task, taskPanelHidden]);
 
   useEffect(() => {
     let frame = 0;
@@ -1360,6 +1372,7 @@ function Overlay({ host }: { host: HTMLElement }) {
       createTaskPayload(bundle),
     );
     if (!sent) {
+      setTaskPanelHidden(false);
       setTask({
         status: "failed",
         requestText: trimmed,
@@ -1378,6 +1391,7 @@ function Overlay({ host }: { host: HTMLElement }) {
       logs: ["요청을 Bridge writer queue에 전달했습니다."],
       diff: "",
     });
+    setTaskPanelHidden(false);
     setRequestOpen(false);
   }, [
     browserSessionId,
@@ -1392,7 +1406,7 @@ function Overlay({ host }: { host: HTMLElement }) {
 
   const runTaskAction = useCallback(
     async (action: "accept" | "revert" | "cancel") => {
-      if (!token || !task?.id) {
+      if (!task?.id) {
         return;
       }
       setBusyAction(true);
@@ -1495,6 +1509,7 @@ function Overlay({ host }: { host: HTMLElement }) {
       logs: [`${task.id.slice(0, 8)} task를 기준으로 후속 요청을 보냈습니다.`],
       diff: "",
     });
+    setTaskPanelHidden(false);
     setFollowUpText("");
     setFollowUpOpen(false);
     lastContextBundleRef.current = contextBundle;
@@ -1543,20 +1558,48 @@ function Overlay({ host }: { host: HTMLElement }) {
               key={value}
               type="button"
               aria-pressed={mode === value ? "true" : "false"}
-              disabled={!token || Boolean(task && ACTIVE_PHASES.has(task.status))}
+              disabled={Boolean(
+                task && ACTIVE_PHASES.has(task.status) && !taskPanelHidden,
+              )}
               onClick={() => chooseMode(value)}
             >
               {label}
             </button>
           ))}
         </div>
-        {mode === "multi" && selected.length > 0 && !requestOpen && !task ? (
+        {mode === "multi"
+        && selected.length > 0
+        && !requestOpen
+        && (!task || taskPanelHidden) ? (
           <button
             type="button"
             class="primary"
             onClick={() => setRequestOpen(true)}
           >
             요청 작성
+          </button>
+        ) : null}
+        {task && !requestOpen ? (
+          <button
+            type="button"
+            class="task-toggle"
+            aria-controls="visual-task-strip"
+            aria-expanded={taskPanelHidden ? "false" : "true"}
+            title={
+              taskPanelHidden
+                ? "숨긴 작업 패널 열기"
+                : "작업은 계속 진행하고 패널만 숨기기"
+            }
+            onClick={() => {
+              if (taskPanelHidden) {
+                setTaskPanelHidden(false);
+                return;
+              }
+              resetSelection();
+              setTaskPanelHidden(true);
+            }}
+          >
+            {taskPanelHidden ? "작업 보기" : "작업 숨기기"}
           </button>
         ) : null}
         {viewerUrl ? (
@@ -1591,10 +1634,12 @@ function Overlay({ host }: { host: HTMLElement }) {
         </span>
       </nav>
 
-      {!requestOpen && !task && hoverRect ? (
+      {!requestOpen
+      && (!task || taskPanelHidden || !ACTIVE_PHASES.has(task.status))
+      && hoverRect ? (
         <Reticle rect={hoverRect} kind="hover" />
       ) : null}
-      {mode !== "page"
+      {mode !== "page" && (!task || !taskPanelHidden || requestOpen)
         ? selectedRects.map(({ item, rect }, index) => (
             <Reticle
               key={item.id}
@@ -1606,7 +1651,7 @@ function Overlay({ host }: { host: HTMLElement }) {
             />
           ))
         : null}
-      {region ? (
+      {region && (!task || !taskPanelHidden || requestOpen) ? (
         <div
           class="region-box"
           style={{
@@ -1619,7 +1664,7 @@ function Overlay({ host }: { host: HTMLElement }) {
         />
       ) : null}
 
-      {requestOpen && !task ? (
+      {requestOpen && (!task || taskPanelHidden) ? (
         <RequestStrip
           panelRef={panelRef}
           position={popoverPosition}
@@ -1635,7 +1680,7 @@ function Overlay({ host }: { host: HTMLElement }) {
         />
       ) : null}
 
-      {task ? (
+      {task && !taskPanelHidden ? (
         <TaskStrip
           panelRef={panelRef}
           position={popoverPosition}
@@ -1652,12 +1697,22 @@ function Overlay({ host }: { host: HTMLElement }) {
           onFollowUp={() => void submitFollowUp()}
           onNewRequest={() => {
             setTask(null);
+            setTaskPanelHidden(false);
+            resetSelection();
+          }}
+          onDismiss={() => {
+            activeTaskIdRef.current = undefined;
+            setTask(null);
+            setTaskPanelHidden(false);
             resetSelection();
           }}
         />
       ) : null}
 
-      {!requestOpen && !task ? <div class="selection-hint">{hint}</div> : null}
+      {!requestOpen
+      && (!task || taskPanelHidden) ? (
+        <div class="selection-hint">{hint}</div>
+      ) : null}
       <div class="visually-hidden" aria-live="polite">
         {task ? `${PHASE_LABELS[task.status]}. ${task.logs.at(-1) ?? ""}` : hint}
       </div>

@@ -126,6 +126,7 @@ export const overlayStyles = String.raw`
     opacity: 0.48;
   }
 
+  .task-toggle,
   .viewer-link {
     margin-left: 4px;
     white-space: nowrap;

@@ -298,7 +298,7 @@ describe("task control service", () => {
     await control.close?.();
   });
 
-  it("streams task events to viewer sockets without accepting control messages", async () => {
+  it("orders and deduplicates viewer replay with events buffered before hello", async () => {
     const repoRoot = await repositoryFixture();
     const gitManager = await GitTransactionManager.open(repoRoot, {
       allowed: ["src/**"],
@@ -321,6 +321,11 @@ describe("task control service", () => {
       },
       hmrWaitMs: 0,
     });
+    const historicalTask = control.createTask?.({
+      contextBundle: context("fixture"),
+    }) as TaskRecord;
+    await taskService.waitForIdle();
+
     const viewer = new FakeControlSocket();
     const disconnectViewer = control.connectViewerWebSocket?.({
       socket: viewer as never,
@@ -339,35 +344,80 @@ describe("task control service", () => {
         }),
       ),
     );
-    expect(control.listTasks?.()).toEqual([]);
+    const listedTasks = control.listTasks?.() as TaskRecord[];
+    expect(listedTasks.map((listedTask) => listedTask.id)).toEqual([
+      historicalTask.id,
+    ]);
     expect(viewer.sent.join("\n")).toContain("read_only_socket");
 
     const task = control.createTask?.({
       contextBundle: context("fixture"),
     }) as TaskRecord;
     await taskService.waitForIdle();
-    expect(viewer.sent.join("\n")).toContain(`\"taskId\":\"${task.id}\"`);
+    expect(viewer.sent.join("\n")).not.toContain(`\"taskId\":\"${task.id}\"`);
 
-    const replayViewer = new FakeControlSocket();
-    const disconnectReplay = control.connectViewerWebSocket?.({
-      socket: replayViewer as never,
-      request: {} as never,
-      projectId: "fixture",
-    }) as (() => void);
-    replayViewer.emit(
+    viewer.emit(
       "message",
       Buffer.from(
         JSON.stringify({
           id: "viewer-hello",
           type: "browser.hello",
           browserSessionId: "00000000-0000-4000-8000-000000000099",
+          payload: {},
+        }),
+      ),
+    );
+    const replayed = viewer.sent
+      .map((value) => JSON.parse(value) as { seq?: number; taskId?: string; type: string })
+      .filter((event): event is { seq: number; taskId?: string; type: string } =>
+        typeof event.seq === "number",
+      );
+    const sequences = replayed.map((event) => event.seq);
+    expect(viewer.sent.join("\n")).toContain("task.queued");
+    expect(viewer.sent.join("\n")).toContain(`\"taskId\":\"${task.id}\"`);
+    expect(viewer.sent.join("\n")).not.toContain(
+      `\"taskId\":\"${historicalTask.id}\"`,
+    );
+    expect(sequences).toEqual([...sequences].sort((left, right) => left - right));
+    expect(new Set(sequences).size).toBe(sequences.length);
+
+    const replayViewer = new FakeControlSocket();
+    const disconnectReplayViewer = control.connectViewerWebSocket?.({
+      socket: replayViewer as never,
+      request: {} as never,
+      projectId: "fixture",
+    }) as (() => void);
+    const liveTask = control.createTask?.({
+      contextBundle: context("fixture"),
+    }) as TaskRecord;
+    await taskService.waitForIdle();
+    replayViewer.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          id: "replay-viewer-hello",
+          type: "browser.hello",
+          browserSessionId: "00000000-0000-4000-8000-000000000098",
           payload: { lastSeq: 0 },
         }),
       ),
     );
-    expect(replayViewer.sent.join("\n")).toContain("task.queued");
+    const replayedWithCursor = replayViewer.sent
+      .map((value) => JSON.parse(value) as { seq?: number; taskId?: string })
+      .filter((event): event is { seq: number; taskId?: string } =>
+        typeof event.seq === "number",
+      );
+    const replayedSequences = replayedWithCursor.map((event) => event.seq);
+    expect(replayViewer.sent.join("\n")).toContain(
+      `\"taskId\":\"${historicalTask.id}\"`,
+    );
+    expect(replayViewer.sent.join("\n")).toContain(`\"taskId\":\"${liveTask.id}\"`);
+    expect(replayedSequences).toEqual(
+      [...replayedSequences].sort((left, right) => left - right),
+    );
+    expect(new Set(replayedSequences).size).toBe(replayedSequences.length);
 
-    disconnectReplay();
+    disconnectReplayViewer();
     disconnectViewer();
     await control.close?.();
   });

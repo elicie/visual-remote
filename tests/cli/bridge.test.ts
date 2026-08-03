@@ -73,12 +73,13 @@ describe("attach CLI lifecycle", () => {
       expect(Number(new URL(bridge.gatewayUrl).port)).toBeGreaterThanOrEqual(10_001);
       expect(new URL(bridge.gatewayUrl).hostname).toBe("dev");
       expect(bridge.gateway.address()?.host).toBe("0.0.0.0");
-      expect(bridge.pairingUrl).toMatch(
-        /^https:\/\/portr\.example\.test\/#visual-pair=/,
-      );
+      expect(bridge.openUrl).toBe("https://portr.example.test/");
       expect(formatBridgeSummary(bridge)).toContain("Upstream:");
       expect(formatBridgeSummary(bridge)).toContain(
         "Public:   https://portr.example.test/",
+      );
+      expect(formatBridgeSummary(bridge)).toContain(
+        "Open:     https://portr.example.test/",
       );
 
       const status = await getBridgeStatus({ cwd: repoRoot, environment });

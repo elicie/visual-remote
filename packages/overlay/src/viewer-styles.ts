@@ -42,6 +42,13 @@ export const viewerStyles = String.raw`
     box-shadow: 0 0 0 5px var(--dispatch-dark);
   }
 
+  .detail-scroll:focus-visible,
+  .logs-block ol:focus-visible,
+  .diff-block pre:focus-visible {
+    outline: 3px solid var(--dispatch);
+    outline-offset: -3px;
+  }
+
   .visually-hidden {
     position: absolute;
     width: 1px;
@@ -705,6 +712,7 @@ export const viewerStyles = String.raw`
     min-height: 0;
     padding: 14px;
     overflow: auto;
+    scrollbar-gutter: stable;
   }
 
   .detail-error {
@@ -822,6 +830,29 @@ export const viewerStyles = String.raw`
     color: #bdb9b0;
   }
 
+  .diff-head-tools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .diff-toggle {
+    min-height: 30px;
+    padding: 4px 8px;
+    border: 1px solid #77786f;
+    border-radius: 3px;
+    background: var(--graphite-2);
+    color: var(--strip-strong);
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 650;
+  }
+
+  .diff-toggle:hover {
+    border-color: #f18755;
+    color: #fff;
+  }
+
   .diff-block pre {
     max-height: 280px;
     margin: 0;
@@ -894,7 +925,7 @@ export const viewerStyles = String.raw`
     }
 
     .refresh-button {
-      min-height: 42px;
+      min-height: 44px;
       margin-left: 0;
     }
 
@@ -933,6 +964,10 @@ export const viewerStyles = String.raw`
     .detail-jump,
     .ledger-search input,
     .ledger-footer button {
+      min-height: 44px;
+    }
+
+    .diff-toggle {
       min-height: 44px;
     }
 
@@ -1014,6 +1049,21 @@ export const viewerStyles = String.raw`
     .refresh-button {
       padding-right: 8px;
       padding-left: 8px;
+    }
+  }
+
+  @media (max-width: 360px) {
+    .status-rail {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      overflow: hidden;
+    }
+
+    .status-rail button:nth-child(2) {
+      border-right: 0;
+    }
+
+    .status-rail button:nth-child(-n + 2) {
+      border-bottom: 1px solid #4a4b46;
     }
   }
 

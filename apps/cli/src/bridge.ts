@@ -6,7 +6,6 @@ import {
 import {
   acquireWorktreeLock,
   createDefaultControlService,
-  createPairingUrl,
   discoverGitWorktreeRoot,
   findAvailablePort,
   generatePairingToken,
@@ -57,7 +56,7 @@ export interface RunningBridge {
   upstreamUrl: string;
   gatewayUrl: string;
   publicUrl?: string;
-  pairingUrl: string;
+  openUrl: string;
   gateway: GatewayServer;
   managedProcess?: ManagedProcess;
   close(): Promise<void>;
@@ -156,7 +155,7 @@ async function startBridgeCore(
       allowedOrigins: [...allowedOrigins],
     });
     const address = await gateway.start();
-    const pairingUrl = createPairingUrl(publicUrl ?? address.url, token);
+    const openUrl = publicUrl ?? address.url;
     const instance: BridgeInstanceRecord = {
       projectId: loadedConfig.config.project.id,
       repoRoot: loadedConfig.repoRoot,
@@ -179,7 +178,7 @@ async function startBridgeCore(
       upstreamUrl: options.upstreamUrl,
       gatewayUrl: address.url,
       ...(publicUrl === undefined ? {} : { publicUrl }),
-      pairingUrl,
+      openUrl,
       gateway,
       ...(options.managedProcess === undefined
         ? {}
@@ -353,6 +352,6 @@ export function formatBridgeSummary(bridge: RunningBridge): string {
   if (bridge.publicUrl !== undefined) {
     rows.push(`Public:   ${bridge.publicUrl}`);
   }
-  rows.push(`Pair URL: ${bridge.pairingUrl}`);
+  rows.push(`Open:     ${bridge.openUrl}`);
   return rows.join("\n");
 }

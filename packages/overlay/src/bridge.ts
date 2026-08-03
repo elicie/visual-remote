@@ -50,6 +50,11 @@ export interface ConnectionSnapshot {
   lastSequence: number;
 }
 
+export interface SequenceGap {
+  expectedSequence: number;
+  receivedSequence: number;
+}
+
 export interface TaskArtifacts {
   changedFiles: string[];
   diff: string;
@@ -70,6 +75,7 @@ export interface BridgeConnectionOptions {
   getPageState?: () => Record<string, unknown>;
   onSnapshot: (snapshot: ConnectionSnapshot) => void;
   onEvent: (event: ServerEvent) => void;
+  onSequenceGap?: (gap: SequenceGap) => void;
 }
 
 function safeSessionGet(key: string): string | null {
@@ -110,19 +116,16 @@ function recordOf(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-export function consumePairingToken(): string | null {
+export function consumePairingToken(): string {
   const parsed = parsePairingFragment(location.hash);
+  safeSessionRemove(PAIRING_TOKEN_KEY);
+  safeSessionRemove(LAST_SEQUENCE_KEY);
   if (parsed.token) {
-    if (safeSessionGet(PAIRING_TOKEN_KEY) !== parsed.token) {
-      safeSessionRemove(LAST_SEQUENCE_KEY);
-    }
-    safeSessionSet(PAIRING_TOKEN_KEY, parsed.token);
     const nextUrl = `${location.pathname}${location.search}${parsed.remainingHash}`;
     history.replaceState(history.state, "", nextUrl);
-    return parsed.token;
   }
 
-  return safeSessionGet(PAIRING_TOKEN_KEY);
+  return "";
 }
 
 export function consumeViewerToken(): string | null {
@@ -173,6 +176,7 @@ export class BridgeConnection {
   private readonly sequenceStorageKey: string;
   private readonly onSnapshot: (snapshot: ConnectionSnapshot) => void;
   private readonly onEvent: (event: ServerEvent) => void;
+  private readonly onSequenceGap: (gap: SequenceGap) => void;
   private socket: WebSocket | null = null;
   private heartbeatTimer: number | undefined;
   private reconnectTimer: number | undefined;
@@ -195,6 +199,7 @@ export class BridgeConnection {
     this.hasReplaySequence = storedSequence !== null || this.mode === "control";
     this.onSnapshot = options.onSnapshot;
     this.onEvent = options.onEvent;
+    this.onSequenceGap = options.onSequenceGap ?? (() => {});
   }
 
   connect(): void {
@@ -312,6 +317,12 @@ export class BridgeConnection {
 
     if (typeof parsed.seq === "number") {
       if (parsed.seq <= this.lastSequence && this.hasReplaySequence) return;
+      if (this.hasReplaySequence && parsed.seq > this.lastSequence + 1) {
+        this.onSequenceGap({
+          expectedSequence: this.lastSequence + 1,
+          receivedSequence: parsed.seq,
+        });
+      }
       this.lastSequence = parsed.seq;
       this.hasReplaySequence = true;
       safeSessionSet(this.sequenceStorageKey, String(this.lastSequence));
@@ -355,7 +366,9 @@ async function authorizedFetch(
   init?: RequestInit,
 ): Promise<Response> {
   const headers = new Headers(init?.headers);
-  headers.set("Authorization", `Bearer ${token}`);
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
   if (init?.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }

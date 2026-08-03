@@ -49,6 +49,7 @@ const VIEWER_HTML = `<!doctype html>
 </html>`;
 const MAX_CONTROL_BODY_BYTES = 1_048_576;
 const CONTROL_AUTH_TIMEOUT_MS = 10_000;
+const DEFAULT_VIEWER_SESSION_TTL_MS = 30 * 60 * 1_000;
 const VIEWER_CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
   "script-src 'self'",
@@ -65,6 +66,7 @@ export interface GatewayOptions {
   upstream: string | URL;
   pairingToken: string;
   viewerToken?: string;
+  viewerSessionTtlMs?: number;
   projectId: string;
   controlService: ControlService;
   host?: string;
@@ -151,20 +153,30 @@ function originAllowed(request: IncomingMessage, allowedOrigins: ReadonlySet<str
 function tokenAccess(
   token: string | undefined,
   controlToken: string,
-  viewerToken: string,
+  viewerSessions: Map<string, number>,
+  now: number,
 ): AccessLevel | undefined {
-  if (token === undefined) return undefined;
+  if (token === undefined || token.length === 0) return "control";
   if (pairingTokensMatch(controlToken, token)) return "control";
-  if (pairingTokensMatch(viewerToken, token)) return "viewer";
+  const expiresAt = viewerSessions.get(token);
+  if (expiresAt !== undefined) {
+    if (expiresAt > now) return "viewer";
+    viewerSessions.delete(token);
+  }
   return undefined;
 }
 
 function requestAccess(
   request: IncomingMessage,
   controlToken: string,
-  viewerToken: string,
+  viewerSessions: Map<string, number>,
 ): AccessLevel | undefined {
-  return tokenAccess(extractBearerToken(request), controlToken, viewerToken);
+  return tokenAccess(
+    extractBearerToken(request),
+    controlToken,
+    viewerSessions,
+    Date.now(),
+  );
 }
 
 function isReadOnlyRoute(route: ApiRoute): boolean {
@@ -507,10 +519,46 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
   );
   const overlayBundlePath = options.overlayBundlePath ?? DEFAULT_OVERLAY_BUNDLE_PATH;
   const viewerBundlePath = options.viewerBundlePath ?? DEFAULT_VIEWER_BUNDLE_PATH;
-  const viewerToken = options.viewerToken ?? generatePairingToken();
-  if (pairingTokensMatch(options.pairingToken, viewerToken)) {
+  const viewerSessionTtlMs =
+    options.viewerSessionTtlMs ?? DEFAULT_VIEWER_SESSION_TTL_MS;
+  if (!Number.isSafeInteger(viewerSessionTtlMs) || viewerSessionTtlMs <= 0) {
+    throw new TypeError("Viewer session TTL must be a positive integer");
+  }
+  let injectedViewerToken = options.viewerToken;
+  if (
+    injectedViewerToken !== undefined
+    && pairingTokensMatch(options.pairingToken, injectedViewerToken)
+  ) {
     throw new TypeError("Viewer token must differ from the control pairing token");
   }
+  const viewerSessions = new Map<string, number>();
+  if (injectedViewerToken !== undefined) {
+    viewerSessions.set(injectedViewerToken, Date.now() + viewerSessionTtlMs);
+  }
+  const issueViewerSessionToken = (): string => {
+    const now = Date.now();
+    for (const [token, expiresAt] of viewerSessions) {
+      if (expiresAt <= now) viewerSessions.delete(token);
+    }
+
+    if (injectedViewerToken !== undefined) {
+      const token = injectedViewerToken;
+      injectedViewerToken = undefined;
+      viewerSessions.set(token, now + viewerSessionTtlMs);
+      return token;
+    }
+
+    let token: string | undefined;
+    while (
+      token === undefined
+      || pairingTokensMatch(options.pairingToken, token)
+      || viewerSessions.has(token)
+    ) {
+      token = generatePairingToken();
+    }
+    viewerSessions.set(token, now + viewerSessionTtlMs);
+    return token;
+  };
   const injectOverlay = options.injectOverlay ?? true;
   const controlWebSocketServer = new WebSocketServer({
     noServer: true,
@@ -594,10 +642,10 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
           writeApiError(response, 403, "origin_forbidden", "Request origin is not allowed");
           return;
         }
-        const access = requestAccess(request, options.pairingToken, viewerToken);
+        const access = requestAccess(request, options.pairingToken, viewerSessions);
         if (access === undefined) {
           response.setHeader("www-authenticate", "Bearer");
-          writeApiError(response, 401, "unauthorized", "A valid pairing token is required");
+          writeApiError(response, 401, "unauthorized", "A valid viewer token is required");
           return;
         }
 
@@ -612,10 +660,11 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
                 response,
                 403,
                 "control_token_required",
-                "A control pairing token is required to open a viewer session",
+                "Viewer sessions cannot open another viewer session",
               );
               return;
             }
+            const viewerToken = issueViewerSessionToken();
             writeJson(response, 200, {
               viewerUrl: `/_visual/viewer#visual-view=${encodeURIComponent(viewerToken)}`,
             });
@@ -731,10 +780,15 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
 
       webSocket.once("message", (data) => {
         const token = parseWebSocketAuth(data);
-        const access = tokenAccess(token, options.pairingToken, viewerToken);
+        const access = tokenAccess(
+          token,
+          options.pairingToken,
+          viewerSessions,
+          Date.now(),
+        );
         if (access === undefined) {
           clearTimeout(timeout);
-          webSocket.close(4401, "Invalid pairing token");
+          webSocket.close(4401, "Invalid viewer token");
           return;
         }
 

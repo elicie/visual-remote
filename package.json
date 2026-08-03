@@ -16,10 +16,12 @@
     "build:server": "corepack pnpm --filter @visual-remote/cli build",
     "dev": "corepack pnpm run build:overlay && tsx apps/cli/src/index.ts",
     "test": "vitest run",
+    "test:e2e": "corepack pnpm run build:overlay && corepack pnpm exec playwright test --config tests/e2e/playwright.config.ts",
     "test:watch": "vitest",
     "typecheck": "corepack pnpm -r --if-present typecheck && tsc --noEmit -p tsconfig.tests.json"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/http-proxy": "^1.17.17",
     "@types/node": "^26.1.2",
     "@types/ws": "^8.18.1",
