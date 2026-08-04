@@ -53,6 +53,7 @@ export interface StartAttachBridgeOptions {
   listen?: number;
   host?: string;
   publicUrl?: string;
+  fallbackPublicUrl?: string;
 }
 
 export interface StartManagedBridgeOptions {
@@ -224,6 +225,7 @@ interface StartBridgeCoreOptions {
   listen?: number;
   host?: string;
   publicUrl?: string;
+  fallbackPublicUrl?: string;
   managedProcess?: ManagedProcess;
   lock?: WorktreeLock;
 }
@@ -274,7 +276,9 @@ async function startBridgeCore(
       (await acquireWorktreeLock(loadedConfig.repoRoot, { environment }));
     const host = options.host ?? loadedConfig.config.gateway.host;
     const configuredPublicUrl =
-      options.publicUrl ?? loadedConfig.config.gateway.publicUrl;
+      options.publicUrl
+      ?? loadedConfig.config.gateway.publicUrl
+      ?? options.fallbackPublicUrl;
     const publicUrl =
       configuredPublicUrl === undefined
         ? undefined
@@ -409,6 +413,9 @@ export async function startAttachBridge(
       ...(options.listen === undefined ? {} : { listen: options.listen }),
       ...(options.host === undefined ? {} : { host: options.host }),
       ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
+      ...(options.fallbackPublicUrl === undefined
+        ? {}
+        : { fallbackPublicUrl: options.fallbackPublicUrl }),
     },
     dependencies,
   );

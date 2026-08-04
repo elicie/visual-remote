@@ -8,6 +8,7 @@ import {
   closeVisualRemoteNext,
   isNextDetachedTelemetryProcess,
   mergeNextRewrites,
+  resolveNextPublicUrl,
   resolveNextUpstream,
   withVisualRemote,
 } from "@visual-remote/cli/next";
@@ -34,6 +35,9 @@ describe("Visual Remote Next.js integration", () => {
     );
     expect(resolveNextUpstream({}, ["node"], { PORT: "10104" })).toBe(
       "http://127.0.0.1:10104",
+    );
+    expect(resolveNextPublicUrl({ appPort: 10_101 }, ["node"], {})).toBe(
+      "http://localhost:10101",
     );
   });
 

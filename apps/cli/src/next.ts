@@ -74,17 +74,35 @@ function commandLinePort(argv: readonly string[]): number | undefined {
   return undefined;
 }
 
+function resolveNextPort(
+  options: Pick<VisualRemoteNextOptions, "appPort">,
+  argv: readonly string[],
+  environment: NodeJS.ProcessEnv,
+): number {
+  return (
+    validPort(options.appPort) ??
+    commandLinePort(argv) ??
+    validPort(environment.PORT) ??
+    3_000
+  );
+}
+
 export function resolveNextUpstream(
   options: Pick<VisualRemoteNextOptions, "appPort"> = {},
   argv: readonly string[] = process.argv,
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
-  const port =
-    validPort(options.appPort) ??
-    commandLinePort(argv) ??
-    validPort(environment.PORT) ??
-    3_000;
+  const port = resolveNextPort(options, argv, environment);
   return `http://127.0.0.1:${port}`;
+}
+
+export function resolveNextPublicUrl(
+  options: Pick<VisualRemoteNextOptions, "appPort"> = {},
+  argv: readonly string[] = process.argv,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const port = resolveNextPort(options, argv, environment);
+  return `http://localhost:${port}`;
 }
 
 export function isNextDetachedTelemetryProcess(
@@ -158,6 +176,7 @@ async function startOrReuseBridge(
     const ownedBridge = await startAttachBridge(
       {
         upstream: resolveNextUpstream(options),
+        fallbackPublicUrl: resolveNextPublicUrl(options),
         ...(options.bridgeHost === undefined ? {} : { host: options.bridgeHost }),
         ...(options.bridgePort === undefined ? {} : { listen: options.bridgePort }),
       },

@@ -2,7 +2,7 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: ".",
-  testMatch: "viewer-smoke.e2e.ts",
+  testMatch: ["viewer-smoke.e2e.ts", "next-single-port.e2e.ts"],
   fullyParallel: false,
   workers: 1,
   timeout: 45_000,

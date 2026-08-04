@@ -8,6 +8,7 @@ import {
   type DirectExecBatchRequest,
   type DirectExecBatchResult,
 } from "../../../packages/bridge-core/src/agents/direct-exec.js";
+import { VISUAL_REMOTE_VERSION } from "./version.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -158,7 +159,10 @@ async function handleRequest(request: RpcRequest, options: ServerOptions): Promi
           ? params.protocolVersion
           : "2024-11-05",
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: "visual-remote-direct-exec", version: "0.3.1" },
+      serverInfo: {
+        name: "visual-remote-direct-exec",
+        version: VISUAL_REMOTE_VERSION,
+      },
     });
     return;
   }

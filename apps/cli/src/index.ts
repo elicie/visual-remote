@@ -12,6 +12,7 @@ import {
 import { formatDoctorChecks, runDoctor } from "./doctor.js";
 import { formatInitResult, initializeVisualDev } from "./init.js";
 import { formatBridgeStatus, getBridgeStatus } from "./status.js";
+import { VISUAL_REMOTE_VERSION } from "./version.js";
 import { assertServicePort } from "@visual-remote/bridge-core";
 
 export interface CliDependencies extends BridgeDependencies {
@@ -44,7 +45,7 @@ export function createCli(dependencies: CliDependencies = {}): Command {
   const program = new Command()
     .name("visual")
     .description("Visual Remote Dev Bridge")
-    .version("0.3.1");
+    .version(VISUAL_REMOTE_VERSION);
 
   program
     .command("init")
@@ -157,3 +158,4 @@ export * from "./bridge.js";
 export * from "./doctor.js";
 export * from "./init.js";
 export * from "./status.js";
+export * from "./version.js";

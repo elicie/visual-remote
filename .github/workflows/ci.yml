@@ -36,3 +36,5 @@ jobs:
           corepack pnpm build
           corepack pnpm test
           corepack pnpm typecheck
+          corepack pnpm test:e2e
+          corepack pnpm pack --dry-run
