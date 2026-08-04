@@ -33,6 +33,6 @@ jobs:
           fi
           test "$(node --version)" = "v24.18.0"
           corepack pnpm install --frozen-lockfile
+          corepack pnpm build
           corepack pnpm test
           corepack pnpm typecheck
-          corepack pnpm build
