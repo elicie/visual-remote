@@ -89,4 +89,42 @@ describe("visual doctor", () => {
       "allowed-origins": "warning",
     });
   });
+
+  it("accepts an installed Claude adapter", async () => {
+    const repoRoot = await createRepository();
+    const binDirectory = await mkdtemp(join(tmpdir(), "visual-doctor-claude-bin-"));
+    await addExecutable(binDirectory, "claude");
+    await mkdir(join(repoRoot, ".visualdev"));
+    await writeFile(
+      join(repoRoot, ".visualdev/config.yaml"),
+      [
+        "version: 1",
+        "project:",
+        "  id: doctor-claude-fixture",
+        "agent:",
+        "  adapter: claude",
+        "  inheritEnv: [ANTHROPIC_API_KEY]",
+        "",
+      ].join("\n"),
+    );
+
+    const checks = await runDoctor({
+      cwd: repoRoot,
+      environment: {
+        ...process.env,
+        PATH: binDirectory,
+        ANTHROPIC_API_KEY: "test-key",
+      },
+    });
+    expect(checks.find(({ name }) => name === "agent")).toMatchObject({
+      status: "pass",
+      message: "claude is executable.",
+    });
+    expect(checks.find(({ name }) => name === "agent-environment")).toMatchObject({
+      status: "pass",
+    });
+    expect(checks.find(({ name }) => name === "claude-sandbox")).toMatchObject({
+      status: "warning",
+    });
+  });
 });

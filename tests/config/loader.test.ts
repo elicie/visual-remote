@@ -20,6 +20,9 @@ describe("visual dev config", () => {
         "  id: fixture",
         "gateway:",
         "  port: 10011",
+        "agent:",
+        "  model: gpt-5.6-sol",
+        "  reasoningEffort: low",
         "security:",
         "  allowedOrigins:",
         "    - https://base.example",
@@ -35,6 +38,8 @@ describe("visual dev config", () => {
       [
         "gateway:",
         "  host: 127.0.0.1",
+        "agent:",
+        "  reasoningEffort: high",
         "security:",
         "  allowedOrigins:",
         "    - https://local.example",
@@ -61,6 +66,8 @@ describe("visual dev config", () => {
       },
     ]);
     expect(loaded.config.agent.adapter).toBe("codex");
+    expect(loaded.config.agent.model).toBe("gpt-5.6-sol");
+    expect(loaded.config.agent.reasoningEffort).toBe("high");
     expect(loaded.loadedFiles).toEqual([
       join(root, ".visualdev/config.yaml"),
       join(root, ".visualdev/config.local.yaml"),
@@ -79,6 +86,66 @@ describe("visual dev config", () => {
     expect(loaded.config.upstream.port).toBe("auto");
     expect(loaded.config.paths.allowed).toContain("tests/**");
     expect(loaded.loadedFiles).toEqual([]);
+  });
+
+  it("validates adapter-specific effort and local environment selection", async () => {
+    const root = await mkdtemp(join(tmpdir(), "visual-config-claude-"));
+    await mkdir(join(root, ".visualdev"));
+    const configPath = join(root, ".visualdev/config.yaml");
+    await writeFile(
+      configPath,
+      [
+        "version: 1",
+        "project:",
+        "  id: claude-fixture",
+        "agent:",
+        "  adapter: claude",
+        "  model: sonnet",
+        "  reasoningEffort: max",
+        "  inheritEnv: [ANTHROPIC_API_KEY]",
+        "",
+      ].join("\n"),
+    );
+
+    const loaded = await loadVisualDevConfig(root);
+    expect(loaded.config.agent).toMatchObject({
+      adapter: "claude",
+      model: "sonnet",
+      reasoningEffort: "max",
+      inheritEnv: ["ANTHROPIC_API_KEY"],
+    });
+
+    await writeFile(
+      configPath,
+      [
+        "version: 1",
+        "project:",
+        "  id: claude-fixture",
+        "agent:",
+        "  adapter: claude",
+        "  reasoningEffort: minimal",
+        "",
+      ].join("\n"),
+    );
+    await expect(loadVisualDevConfig(root)).rejects.toThrow(
+      "minimal reasoning effort is only supported by the Codex adapter",
+    );
+
+    await writeFile(
+      configPath,
+      [
+        "version: 1",
+        "project:",
+        "  id: codex-fixture",
+        "agent:",
+        "  adapter: codex",
+        "  reasoningEffort: max",
+        "",
+      ].join("\n"),
+    );
+    await expect(loadVisualDevConfig(root)).rejects.toThrow(
+      "max reasoning effort is only supported by the Claude adapter",
+    );
   });
 
   it("rejects a workspace symlink that escapes the worktree", async () => {

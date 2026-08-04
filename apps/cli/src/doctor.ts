@@ -150,7 +150,7 @@ export async function runDoctor(
     }
 
     const adapter = loaded.config.agent.adapter;
-    const adapterSupported = adapter === "codex";
+    const adapterSupported = adapter === "codex" || adapter === "claude";
     const agentAvailable = await executableAvailable(
       adapter,
       loaded.workspaceRoot,
@@ -165,6 +165,44 @@ export async function runDoctor(
           ? `${adapter} is executable.`
           : `${adapter} was not found or is not executable.`,
     });
+
+    if (loaded.config.agent.inheritEnv.length > 0) {
+      const missing = loaded.config.agent.inheritEnv.filter(
+        (name) => environment[name] === undefined,
+      );
+      checks.push({
+        name: "agent-environment",
+        status: missing.length === 0 ? "pass" : "fail",
+        message:
+          missing.length === 0
+            ? `${loaded.config.agent.inheritEnv.length} agent environment variable(s) are available.`
+            : `Missing agent environment variable(s): ${missing.join(", ")}.`,
+      });
+    }
+
+    if (adapter === "claude") {
+      const sandboxDependencies = await Promise.all(
+        ["bwrap", "socat"].map(async (executable) => ({
+          executable,
+          available: await executableAvailable(
+            executable,
+            loaded.workspaceRoot,
+            environment,
+          ),
+        })),
+      );
+      const missing = sandboxDependencies
+        .filter(({ available }) => !available)
+        .map(({ executable }) => executable);
+      checks.push({
+        name: "claude-sandbox",
+        status: missing.length === 0 ? "pass" : "warning",
+        message:
+          missing.length === 0
+            ? "Claude Bash sandbox dependencies are available."
+            : `Claude Bash sandbox is unavailable without: ${missing.join(", ")}.`,
+      });
+    }
 
     const rtkAvailable = await executableAvailable(
       "rtk",

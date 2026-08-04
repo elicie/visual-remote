@@ -1,7 +1,8 @@
 # Visual Remote Dev Bridge
 
 실행 중인 개발 화면에서 요소나 영역을 선택하고 자연어 요청을 보내면, 해당 Git
-작업 트리에서 Codex가 소스를 수정하도록 연결하는 저장소 전용 개발 브리지입니다.
+작업 트리에서 선택한 코딩 에이전트가 소스를 수정하도록 연결하는 저장소 전용 개발
+브리지입니다.
 브라우저에서 진행 상태, 변경 파일, 차이, 검증 결과를 확인하고 변경을 유지하거나
 되돌릴 수 있습니다.
 
@@ -9,7 +10,7 @@
 
 - Node.js 24.18.0
 - Git
-- 인증을 마친 `codex` 명령줄 도구
+- 인증을 마친 `codex` 또는 `claude` 명령줄 도구
 - Corepack으로 실행하는 pnpm 10.34.5
 - 외부 접속이 필요하면 Portr와 같은 HTTP/WebSocket 터널
 
@@ -83,15 +84,15 @@ corepack pnpm build
 node apps/cli/dist/index.js doctor
 ```
 
-`doctor`에서 Git 작업 트리, 현재 프로젝트 설정과 Codex 실행 환경을 확인합니다.
+`doctor`에서 Git 작업 트리, 현재 프로젝트 설정과 선택한 에이전트 실행 환경을 확인합니다.
 
-Codex 작업 중 `pwd`, 버전 확인, 파일 읽기·검색과 read-only Git 명령은 Bridge가
+에이전트 작업 중 `pwd`, 버전 확인, 파일 읽기·검색과 read-only Git 명령은 Bridge가
 등록한 구조화 도구로 실행합니다. 이 경로는 명령을 `argv` 배열과 등록된 workspace
 `cwd`로 전달하고 `shell: false`로 실행하며, 지원되는 명령은 RTK로 자동 압축합니다.
 직접 실행기는 명령별 읽기 전용 문법만 허용하고 경로·symlink를 Git worktree 안으로
 제한하며, 타임아웃 시 하위 프로세스까지 종료합니다. 명령 소요 시간, RTK 사용,
-출력 축약 여부와 Codex가 제공하는 토큰 사용량은 작업 로그에 함께 기록됩니다.
-파일 수정, 테스트·빌드 또는 파이프처럼 셸 문법이 필요한 작업만 Codex의 sandbox
+출력 축약 여부와 에이전트가 제공하는 토큰 사용량은 작업 로그에 함께 기록됩니다.
+파일 수정, 테스트·빌드 또는 파이프처럼 셸 문법이 필요한 작업만 에이전트의 sandbox
 명령 실행기로 보냅니다.
 
 ## 자동화 셸에서 Node.js 24 사용
@@ -142,7 +143,12 @@ upstream:
 
 agent:
   adapter: codex
+  # profile: proxy
+  # model: gpt-5.6-sol
+  # reasoningEffort: medium
+  # inheritEnv: [CUSTOM_PROVIDER_KEY]
   maxRunMs: 900000
+  resumeMode: auto
 
 verification:
   hmrWaitMs: 12000
@@ -171,9 +177,38 @@ paths:
     - dist/**
 ```
 
+`agent.model`과 `agent.reasoningEffort`를 지정하면 새 작업과 재개 작업에 동일하게
+적용됩니다. Codex effort는 `minimal`, `low`, `medium`, `high`, `xhigh`를, Claude
+effort는 `low`, `medium`, `high`, `xhigh`, `max`를 지원합니다. 값을 생략하면 선택한
+CLI의 현재 기본 설정을 사용합니다.
+
+Claude를 사용하려면 `adapter: claude`로 변경합니다. Visual Remote는 Claude를
+`acceptEdits` 권한으로 실행하고 사용자 MCP를 로드하지 않습니다. Linux에서 Bash
+sandbox까지 사용하려면 `bwrap`과 `socat`이 모두 필요하며 `visual doctor`가 설치
+상태를 표시합니다.
+
+Codex의 OpenAI-compatible provider는 사용자 Codex profile에 정의하고
+`agent.profile`로 선택합니다. provider는 Responses API streaming을 지원해야 합니다.
+예를 들어 `$CODEX_HOME/proxy.config.toml`은 다음처럼 작성합니다.
+
+```toml
+model_provider = "proxy"
+
+[model_providers.proxy]
+name = "OpenAI-compatible proxy"
+base_url = "https://proxy.example.com/v1"
+wire_api = "responses"
+env_key = "CUSTOM_PROVIDER_KEY"
+```
+
+API key 값은 YAML에 기록하지 않습니다. `agent.inheritEnv`에는 부모 프로세스에서
+Codex 또는 Claude로 전달할 환경변수 이름만 작성하며, 누락된 변수는 `visual doctor`가
+실패로 보고합니다. 개인별 선택은 Git에서 제외되는
+`.visualdev/config.local.yaml`에 둘 수 있습니다.
+
 `project.workspace`, `paths.allowed`, `paths.denied`는 설정 파일이 가리키는 앱 workspace
 기준입니다. 모노레포의 `apps/web`에서 `init`했다면 `src/**`는
-`apps/web/src/**`로 안전하게 정규화되고 Codex의 기본 cwd도 `apps/web`이 됩니다.
+`apps/web/src/**`로 안전하게 정규화되고 에이전트의 기본 cwd도 `apps/web`이 됩니다.
 
 Vite 플러그인 또는 Next.js 설정 래퍼가 개발 서버와 함께 내부 Bridge를 시작합니다.
 `visual dev`가 Bridge를 먼저 소유한 경우 자식 Vite 플러그인은 runtime registry의
@@ -238,7 +273,7 @@ visual doctor
 - `attach`: 기본 명령의 명시적 이름이며 기존 사용법과 호환됩니다.
 - `dev`: `init` 설정을 사용해 앱과 브리지를 함께 실행하는 선택 명령입니다.
 - `status`: 현재 Git 작업 트리의 브리지 실행 상태를 확인합니다.
-- `doctor`: Git, 설정 파일, 개발 명령과 Codex 사용 가능 여부를 점검합니다.
+- `doctor`: Git, 설정 파일, 개발 명령과 선택한 에이전트 사용 가능 여부를 점검합니다.
 
 ## 개발 및 검증
 

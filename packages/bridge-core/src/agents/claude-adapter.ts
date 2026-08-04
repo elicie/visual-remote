@@ -1,14 +1,12 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { AsyncQueue } from "./async-queue.js";
-import { parseCodexJsonLine } from "./codex-event-parser.js";
 import {
   installEmergencyChildExitHook,
   terminateChildProcessTree,
 } from "../runtime/managed-process.js";
+import { AsyncQueue } from "./async-queue.js";
+import { ClaudeEventParser } from "./claude-event-parser.js";
 import {
   AgentCanceledError,
   AgentProcessError,
@@ -20,14 +18,12 @@ import {
   type NormalizedAgentEvent,
 } from "./types.js";
 
-export interface CodexAdapterOptions {
+export interface ClaudeAdapterOptions {
   executable?: string;
   killGraceMs?: number;
   model?: string;
-  profile?: string;
-  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max";
   rtkExecutable?: string | false;
-  directExecMcpScript?: string | false;
 }
 
 const execFileAsync = promisify(execFile);
@@ -45,8 +41,8 @@ const INHERITED_ENVIRONMENT = [
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
   "XDG_STATE_HOME",
-  "CODEX_HOME",
-  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "CLAUDE_CODE_OAUTH_TOKEN",
   "HTTPS_PROXY",
   "HTTP_PROXY",
   "NO_PROXY",
@@ -57,6 +53,28 @@ const INHERITED_ENVIRONMENT = [
   "COMSPEC",
   "PATHEXT",
 ] as const;
+
+const EMPTY_MCP_CONFIG = JSON.stringify({ mcpServers: {} });
+const CLAUDE_SETTINGS = JSON.stringify({
+  permissions: {
+    disableBypassPermissionsMode: "disable",
+    deny: [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)",
+      "Edit(./.git/**)",
+      "Edit(./.visualdev/runtime/**)",
+      "Edit(./node_modules/**)",
+    ],
+  },
+  sandbox: {
+    enabled: true,
+    autoAllowBashIfSandboxed: true,
+    allowUnsandboxedCommands: false,
+    network: { strictAllowlist: true },
+  },
+});
 
 function processEnv(overrides: Record<string, string>): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
@@ -79,37 +97,21 @@ function splitLines(
   return remainder;
 }
 
-function defaultDirectExecMcpScript(): string | undefined {
-  const candidates = [
-    fileURLToPath(new URL("./direct-exec-mcp.js", import.meta.url)),
-    fileURLToPath(
-      new URL("../../../../apps/cli/dist/direct-exec-mcp.js", import.meta.url),
-    ),
-  ];
-  return candidates.find((candidate) => existsSync(candidate));
-}
-
-export class CodexAdapter implements AgentAdapter {
-  readonly id = "codex";
+export class ClaudeAdapter implements AgentAdapter {
+  readonly id = "claude";
   readonly #executable: string;
   readonly #killGraceMs: number;
   readonly #model: string | undefined;
-  readonly #profile: string | undefined;
-  readonly #reasoningEffort: CodexAdapterOptions["reasoningEffort"];
+  readonly #reasoningEffort: ClaudeAdapterOptions["reasoningEffort"];
   readonly #rtkExecutable: string | false;
-  readonly #directExecMcpScript: string | undefined;
   #rtkVersion: Promise<string | undefined> | undefined;
 
-  constructor(options: CodexAdapterOptions = {}) {
-    this.#executable = options.executable ?? "codex";
+  constructor(options: ClaudeAdapterOptions = {}) {
+    this.#executable = options.executable ?? "claude";
     this.#killGraceMs = options.killGraceMs ?? 2_000;
     this.#model = options.model;
-    this.#profile = options.profile;
     this.#reasoningEffort = options.reasoningEffort;
     this.#rtkExecutable = options.rtkExecutable ?? "rtk";
-    this.#directExecMcpScript = options.directExecMcpScript === false
-      ? undefined
-      : options.directExecMcpScript ?? defaultDirectExecMcpScript();
   }
 
   #probeRtk(environment: NodeJS.ProcessEnv): Promise<string | undefined> {
@@ -130,47 +132,35 @@ export class CodexAdapter implements AgentAdapter {
     input: AgentRunInput,
     environment: NodeJS.ProcessEnv,
   ): Promise<string> {
-    const commandGuidance = this.#rtkExecutable === false
-      ? ""
-      : await this.#probeRtk(environment).then((version) => version
+    if (this.#rtkExecutable === false) return input.prompt;
+    const guidance = await this.#probeRtk(environment).then((version) =>
+      version
         ? `RTK command proxy:\n- ${version} is installed and available in this runtime.\n- Prefix shell commands with RTK by default (for example: rtk git status, rtk rg <pattern>, rtk read <file>, rtk npm test).\n- Use the native command only when RTK has no suitable proxy or RTK execution fails. Do not spend time rediscovering or reinstalling RTK.`
-        : `RTK command proxy:\n- RTK was not detected in this runtime. Use native repository commands directly and do not spend time searching for RTK.`);
-    const directExecGuidance = this.#directExecMcpScript === undefined
-      ? ""
-      : `Direct read-only command runner:\n- Use the visual_remote_exec run_readonly MCP tool (mcp__visual_remote_exec__run_readonly) for repository inspection by default: pwd, version checks, file listing/reading/search, and read-only Git status/diff/log/show.\n- Send argv arrays, batch independent reads in one tool call, and keep cwd at the registered workspace unless a known subdirectory is required.\n- The tool executes without a shell and applies RTK automatically when supported.\n- Use command_execution only for edits, tests/builds, or commands that genuinely require shell syntax. Do not retry a policy-rejected command through another shell unless the requested work requires that non-read-only operation.`;
-    const guidance = [directExecGuidance, commandGuidance].filter(Boolean).join("\n\n");
-    return guidance.length === 0
-      ? input.prompt
-      : `${input.prompt.trimEnd()}\n\n${guidance}\n`;
+        : `RTK command proxy:\n- RTK was not detected in this runtime. Use native repository commands directly and do not spend time searching for RTK.`,
+    );
+    return `${input.prompt.trimEnd()}\n\n${guidance}\n`;
   }
 
-  #directExecConfig(input: AgentRunInput): string[] {
-    if (this.#directExecMcpScript === undefined) return [];
-    const serverArgs = [
-      this.#directExecMcpScript,
-      "--repo-root",
-      input.repoRoot,
-      "--workspace-root",
-      input.workspaceRoot,
-      ...(this.#rtkExecutable === false
-        ? ["--no-rtk"]
-        : ["--rtk", this.#rtkExecutable]),
-    ];
+  #baseArgs(): string[] {
     return [
-      "-c",
-      `mcp_servers.visual_remote_exec.command=${JSON.stringify(process.execPath)}`,
-      "-c",
-      `mcp_servers.visual_remote_exec.args=${JSON.stringify(serverArgs)}`,
-    ];
-  }
-
-  #modelConfig(): string[] {
-    return [
-      ...(this.#profile === undefined ? [] : ["--profile", this.#profile]),
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--permission-mode",
+      "acceptEdits",
+      "--strict-mcp-config",
+      "--mcp-config",
+      EMPTY_MCP_CONFIG,
+      "--no-chrome",
+      "--tools",
+      "Read,Glob,Grep,Edit,Write,Bash",
+      "--settings",
+      CLAUDE_SETTINGS,
       ...(this.#model === undefined ? [] : ["--model", this.#model]),
       ...(this.#reasoningEffort === undefined
         ? []
-        : ["-c", `model_reasoning_effort=${JSON.stringify(this.#reasoningEffort)}`]),
+        : ["--effort", this.#reasoningEffort]),
     ];
   }
 
@@ -204,20 +194,7 @@ export class CodexAdapter implements AgentAdapter {
     input: AgentRunInput,
     signal: AbortSignal,
   ): AsyncIterable<NormalizedAgentEvent> {
-    const args = [
-      "exec",
-      "--json",
-      "--color",
-      "never",
-      "-s",
-      "workspace-write",
-      "-C",
-      input.workspaceRoot,
-      ...this.#modelConfig(),
-      ...this.#directExecConfig(input),
-      "-",
-    ];
-    yield* this.#execute(input, signal, args);
+    yield* this.#execute(input, signal, this.#baseArgs());
   }
 
   async *resume(
@@ -225,24 +202,13 @@ export class CodexAdapter implements AgentAdapter {
     signal: AbortSignal,
   ): AsyncIterable<NormalizedAgentEvent> {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(input.sessionId)) {
-      throw new Error("Refusing to resume an invalid Codex session id");
+      throw new Error("Refusing to resume an invalid Claude session id");
     }
-    const args = [
-      "exec",
-      "--json",
-      "--color",
-      "never",
-      "-s",
-      "workspace-write",
-      "-C",
-      input.workspaceRoot,
-      ...this.#modelConfig(),
-      ...this.#directExecConfig(input),
-      "resume",
-      input.sessionId,
-      "-",
-    ];
-    yield* this.#execute(input, signal, args);
+    yield* this.#execute(
+      input,
+      signal,
+      [...this.#baseArgs(), "--resume", input.sessionId],
+    );
   }
 
   async *#execute(
@@ -253,6 +219,7 @@ export class CodexAdapter implements AgentAdapter {
     const queue = new AsyncQueue<NormalizedAgentEvent>();
     const environment = processEnv(input.environment);
     const prompt = await this.#runtimePrompt(input, environment);
+    const parser = new ClaudeEventParser(input.workspaceRoot);
     const child = spawn(this.#executable, args, {
       cwd: input.workspaceRoot,
       env: environment,
@@ -289,7 +256,7 @@ export class CodexAdapter implements AgentAdapter {
 
     child.stdout.on("data", (chunk: Buffer | string) => {
       stdoutRemainder = splitLines(chunk, stdoutRemainder, (line) => {
-        for (const event of parseCodexJsonLine(line, input.workspaceRoot)) queue.push(event);
+        for (const event of parser.parse(line)) queue.push(event);
       });
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
@@ -304,9 +271,7 @@ export class CodexAdapter implements AgentAdapter {
       void (async () => {
         await requestTermination();
         if (stdoutRemainder.trim()) {
-          for (const event of parseCodexJsonLine(stdoutRemainder, input.workspaceRoot)) {
-            queue.push(event);
-          }
+          for (const event of parser.parse(stdoutRemainder)) queue.push(event);
         }
         if (stderrRemainder.trim()) queue.push({ type: "warning", text: stderrRemainder });
         if (timedOut) queue.end(new AgentTimeoutError());
@@ -314,7 +279,7 @@ export class CodexAdapter implements AgentAdapter {
         else if (code !== 0) {
           queue.end(
             new AgentProcessError(
-              `Codex exited with code ${String(code)}`,
+              `Claude exited with code ${String(code)}`,
               code,
               closeSignal,
             ),

@@ -1,5 +1,10 @@
-import { CodexAdapter } from "../agents/index.js";
+import {
+  ClaudeAdapter,
+  CodexAdapter,
+  type AgentAdapter,
+} from "../agents/index.js";
 import { loadVisualDevConfig } from "../config/index.js";
+import type { VisualDevConfig } from "../config/schema.js";
 import {
   GitTransactionManager,
   rebaseWorkspacePatterns,
@@ -10,6 +15,45 @@ import type { BridgeControlContext } from "./control-context.js";
 import type { ControlService } from "./control-service.js";
 import { createTaskControlService } from "./task-control-service.js";
 
+function createAgentAdapter(agent: VisualDevConfig["agent"]): AgentAdapter {
+  if (agent.adapter === "claude") {
+    if (agent.reasoningEffort === "minimal") {
+      throw new Error("Claude does not support minimal reasoning effort");
+    }
+    return new ClaudeAdapter({
+      ...(agent.model === undefined ? {} : { model: agent.model }),
+      ...(agent.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: agent.reasoningEffort }),
+    });
+  }
+  if (agent.adapter === "codex") {
+    if (agent.reasoningEffort === "max") {
+      throw new Error("Codex does not support max reasoning effort");
+    }
+    return new CodexAdapter({
+      ...(agent.model === undefined ? {} : { model: agent.model }),
+      ...(agent.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: agent.reasoningEffort }),
+      ...(agent.profile === undefined ? {} : { profile: agent.profile }),
+    });
+  }
+  throw new Error(`Agent adapter ${agent.adapter} is not implemented in this build`);
+}
+
+function inheritedAgentEnvironment(
+  names: readonly string[],
+  environment: NodeJS.ProcessEnv,
+): Record<string, string> {
+  return Object.fromEntries(
+    names.flatMap((name) => {
+      const value = environment[name];
+      return value === undefined ? [] : [[name, value]];
+    }),
+  );
+}
+
 export async function createDefaultControlService(
   context: BridgeControlContext,
   environment: NodeJS.ProcessEnv = process.env,
@@ -17,12 +61,6 @@ export async function createDefaultControlService(
   const loaded = await loadVisualDevConfig(context.repoRoot, {
     ...(context.configRoot === undefined ? {} : { configRoot: context.configRoot }),
   });
-  if (loaded.config.agent.adapter !== "codex") {
-    throw new Error(
-      `Agent adapter ${loaded.config.agent.adapter} is not implemented in this MVP build`,
-    );
-  }
-
   const git = await GitTransactionManager.open(context.repoRoot, {
     allowed: rebaseWorkspacePatterns(
       context.repoRoot,
@@ -41,13 +79,16 @@ export async function createDefaultControlService(
     projectId: context.projectId,
     workspaceRoot: context.workspaceRoot,
     upstreamUrl: context.upstreamUrl,
-    adapter: new CodexAdapter(),
+    adapter: createAgentAdapter(loaded.config.agent),
     store,
     git,
     maxRunMs: loaded.config.agent.maxRunMs,
     maxPending: loaded.config.queue.maxPending,
     resumeMode: loaded.config.agent.resumeMode,
-    environment: {},
+    environment: inheritedAgentEnvironment(
+      loaded.config.agent.inheritEnv,
+      environment,
+    ),
   });
 
   const controlService = createTaskControlService({

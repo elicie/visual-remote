@@ -162,6 +162,101 @@ console.log(JSON.stringify({
     }
   });
 
+  it("pins the configured model and reasoning effort for new and resumed runs", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "visual-codex-model-test-"));
+    try {
+      const command = await executable(
+        directory,
+        `
+let body = "";
+for await (const chunk of process.stdin) body += chunk;
+console.log(JSON.stringify({
+  type:"item.completed",
+  item:{type:"agent_message",text:JSON.stringify({
+    args:process.argv.slice(2),
+    providerKey:process.env.CUSTOM_PROVIDER_KEY
+  })}
+}));
+`,
+      );
+      const adapter = new CodexAdapter({
+        executable: command,
+        model: "gpt-5.6-sol",
+        profile: "proxy",
+        reasoningEffort: "high",
+        rtkExecutable: false,
+        directExecMcpScript: false,
+      });
+
+      const runEvents: NormalizedAgentEvent[] = [];
+      for await (const event of adapter.run(
+        input(directory, { CUSTOM_PROVIDER_KEY: "provider-secret" }),
+        new AbortController().signal,
+      )) {
+        runEvents.push(event);
+      }
+      const runMessage = runEvents.find((event) => event.type === "message");
+      if (runMessage?.type !== "message") throw new Error("Missing run message");
+      const runRecord = JSON.parse(runMessage.text) as {
+        args: string[];
+        providerKey: string;
+      };
+      expect(runRecord.providerKey).toBe("provider-secret");
+      expect(runRecord.args).toEqual([
+        "exec",
+        "--json",
+        "--color",
+        "never",
+        "-s",
+        "workspace-write",
+        "-C",
+        directory,
+        "--profile",
+        "proxy",
+        "--model",
+        "gpt-5.6-sol",
+        "-c",
+        'model_reasoning_effort="high"',
+        "-",
+      ]);
+
+      const resumeEvents: NormalizedAgentEvent[] = [];
+      for await (const event of adapter.resume(
+        {
+          ...input(directory, { CUSTOM_PROVIDER_KEY: "provider-secret" }),
+          sessionId: "thread-model-test",
+        },
+        new AbortController().signal,
+      )) {
+        resumeEvents.push(event);
+      }
+      const resumeMessage = resumeEvents.find((event) => event.type === "message");
+      if (resumeMessage?.type !== "message") throw new Error("Missing resume message");
+      const resumeRecord = JSON.parse(resumeMessage.text) as { args: string[] };
+      expect(resumeRecord.args).toEqual([
+        "exec",
+        "--json",
+        "--color",
+        "never",
+        "-s",
+        "workspace-write",
+        "-C",
+        directory,
+        "--profile",
+        "proxy",
+        "--model",
+        "gpt-5.6-sol",
+        "-c",
+        'model_reasoning_effort="high"',
+        "resume",
+        "thread-model-test",
+        "-",
+      ]);
+    } finally {
+      await rm(directory, { recursive: true });
+    }
+  });
+
   it("adds RTK guidance when installed and preserves the repo cwd in command events", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "visual-codex-rtk-test-"));
     try {

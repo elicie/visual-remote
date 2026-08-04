@@ -4,6 +4,10 @@ const servicePortSchema = z.number().int().min(10_001).max(65_535);
 
 const commandSchema = z.array(z.string().min(1)).min(1);
 
+const environmentVariableSchema = z
+  .string()
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Expected an environment variable name");
+
 const readySchema = z
   .object({
     path: z.string().startsWith("/").default("/"),
@@ -46,10 +50,46 @@ export const visualDevConfigSchema = z
     agent: z
       .object({
         adapter: z.enum(["codex", "claude", "opencode"]),
+        model: z.string().trim().min(1).optional(),
+        reasoningEffort: z
+          .enum(["minimal", "low", "medium", "high", "xhigh", "max"])
+          .optional(),
+        profile: z
+          .string()
+          .trim()
+          .regex(
+            /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,
+            "Expected a Codex profile name",
+          )
+          .optional(),
+        inheritEnv: z.array(environmentVariableSchema).default([]),
         maxRunMs: z.number().int().positive(),
         resumeMode: z.enum(["auto", "new"]).default("auto"),
       })
-      .strict(),
+      .strict()
+      .superRefine((agent, context) => {
+        if (agent.adapter === "claude" && agent.reasoningEffort === "minimal") {
+          context.addIssue({
+            code: "custom",
+            path: ["reasoningEffort"],
+            message: "minimal reasoning effort is only supported by the Codex adapter",
+          });
+        }
+        if (agent.adapter === "codex" && agent.reasoningEffort === "max") {
+          context.addIssue({
+            code: "custom",
+            path: ["reasoningEffort"],
+            message: "max reasoning effort is only supported by the Claude adapter",
+          });
+        }
+        if (agent.adapter !== "codex" && agent.profile !== undefined) {
+          context.addIssue({
+            code: "custom",
+            path: ["profile"],
+            message: "agent.profile is only supported by the Codex adapter",
+          });
+        }
+      }),
     queue: z
       .object({
         maxPending: z.number().int().positive(),
@@ -107,6 +147,7 @@ export function createDefaultConfig(projectId: string): VisualDevConfig {
     },
     agent: {
       adapter: "codex",
+      inheritEnv: [],
       maxRunMs: 900_000,
       resumeMode: "auto",
     },

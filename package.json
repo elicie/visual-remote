@@ -1,7 +1,7 @@
 {
   "name": "visual-remote",
   "version": "0.3.1",
-  "description": "Visual bridge from a running web UI to Codex in its Git worktree",
+  "description": "Visual bridge from a running web UI to a coding agent in its Git worktree",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
   "repository": {
