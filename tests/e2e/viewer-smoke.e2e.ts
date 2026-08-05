@@ -207,6 +207,36 @@ test("standalone viewer covers bootstrap, live review, read-only access, and mob
     .getByRole("button", { name: "요소", exact: true })
     .click();
   await page.getByRole("button", { name: "Save changes" }).click();
+  const elementRequest = page.getByRole("region", {
+    name: "수정 요청 작성",
+  });
+  await expect(elementRequest).toContainText("<button> Save changes");
+  await expect(elementRequest).toContainText("LoginPage › LoginForm");
+  await expect(elementRequest).toContainText("screen.ts:1:1");
+  await elementRequest.getByText("전체 선택 컨텍스트").click();
+  await expect(elementRequest.locator(".target-detail-body code")).toContainText(
+    "in LoginForm (at src/screen.ts:1:1) in LoginPage (at src/screen.ts:2:1)",
+  );
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: fixture.origin,
+  });
+  await elementRequest.getByRole("button", { name: "컨텍스트 복사" }).click();
+  await expect(elementRequest.getByRole("status")).toHaveText("클립보드에 복사됨");
+  await expect.poll(
+    async () => await page.evaluate(() => navigator.clipboard.readText()),
+  ).toContain("in LoginPage (at src/screen.ts:2:1)");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await elementRequest.locator(".target-details summary").evaluate(
+      (element) => element.getBoundingClientRect().height,
+    ),
+  ).toBeGreaterThanOrEqual(44);
+  expect(
+    await elementRequest.locator(".target-copy").evaluate(
+      (element) => element.getBoundingClientRect().height,
+    ),
+  ).toBeGreaterThanOrEqual(44);
+  await page.setViewportSize({ width: 1_280, height: 900 });
   const overlayRequest = page.getByPlaceholder(
     "선택한 화면을 어떻게 바꿀까요?",
   );

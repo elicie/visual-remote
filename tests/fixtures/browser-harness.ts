@@ -67,7 +67,27 @@ const upstream = createServer((_request, response) => {
     <main data-source-file="src/screen.ts" data-source-line="1">
       <h1>Remote preview fixture</h1>
       <p>Select the button and dispatch a safe test change.</p>
-      <button id="primary" data-testid="primary-action" data-source-file="src/screen.ts" data-source-line="1">Save changes</button>
+      <button id="primary" data-testid="primary-action" data-component-name="LoginForm" data-source-file="src/screen.ts" data-source-line="1" data-source-column="1">Save changes</button>
+      <script>
+        function LoginForm() {}
+        function LoginPage() {}
+        const target = document.querySelector("#primary");
+        Object.defineProperty(target, "__reactFiber$visualFixture", {
+          enumerable: true,
+          value: {
+            type: "button",
+            return: {
+              type: LoginForm,
+              _debugSource: { fileName: "src/screen.ts", lineNumber: 1, columnNumber: 1 },
+              return: {
+                type: LoginPage,
+                _debugSource: { fileName: "src/screen.ts", lineNumber: 2, columnNumber: 1 },
+                return: null,
+              },
+            },
+          },
+        });
+      </script>
     </main>
   </body>
 </html>`);

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   calculatePopoverPosition,
   compactText,
+  describeTarget,
   intersectionRatio,
   normalizeRect,
   parsePairingFragment,
@@ -19,7 +20,11 @@ import {
   logFromEvent,
   routeTaskEvent,
 } from "@visual-remote/overlay/bridge";
-import type { ServerEvent, TaskRecord } from "@visual-remote/protocol";
+import type {
+  ServerEvent,
+  TargetContext,
+  TaskRecord,
+} from "@visual-remote/protocol";
 
 const BROWSER_A = "00000000-0000-4000-8000-000000000001";
 const BROWSER_B = "00000000-0000-4000-8000-000000000002";
@@ -245,6 +250,91 @@ describe("request input", () => {
 
   it("compacts and bounds captured text", () => {
     expect(compactText("  one \n two   three ", 9)).toBe("one two…");
+  });
+});
+
+describe("selected target descriptions", () => {
+  const target: TargetContext = {
+    targetId: "target-login",
+    order: 0,
+    dom: {
+      tagName: "button",
+      id: "login",
+      classNames: ["flex", "h-[52px]", "w-full"],
+      text: "로그인",
+      role: "button",
+      accessibleName: "로그인",
+      attributes: { type: "submit", "aria-label": "로그인" },
+      rect: { x: 20, y: 40, width: 180, height: 52 },
+      locatorCandidates: [],
+      parentPath: [],
+    },
+    styles: {},
+    source: {
+      primary: {
+        filePath: "src/components/auth/login-form.tsx",
+        lineNumber: 269,
+        columnNumber: 104,
+        componentName: "LoginForm",
+      },
+      stack: [
+        {
+          filePath: "src/components/auth/login-form.tsx",
+          lineNumber: 269,
+          columnNumber: 104,
+          componentName: "LoginForm",
+        },
+        {
+          filePath: "src/app/(unauth)/login/page.tsx",
+          lineNumber: 14,
+          columnNumber: 9,
+          componentName: "LoginPage",
+        },
+      ],
+      confidence: "probable",
+    },
+  };
+
+  it("keeps the default readout compact while preserving the component chain", () => {
+    expect(describeTarget(target)).toEqual({
+      elementLabel: "<button> 로그인",
+      componentPath: "LoginPage › LoginForm",
+      primarySource: "login-form.tsx:269:104",
+      sourceCandidates: [
+        {
+          componentName: "LoginForm",
+          location: "src/components/auth/login-form.tsx:269:104",
+        },
+        {
+          componentName: "LoginPage",
+          location: "src/app/(unauth)/login/page.tsx:14:9",
+        },
+      ],
+      copyText:
+        '[<button type="submit" id="login" class="flex h-[52px] w-full" aria-label="로그인">로그인</button> in LoginForm (at src/components/auth/login-form.tsx:269:104) in LoginPage (at src/app/(unauth)/login/page.tsx:14:9)]',
+    });
+  });
+
+  it("still produces a useful DOM description when source metadata is unavailable", () => {
+    expect(
+      describeTarget({
+        ...target,
+        dom: {
+          ...target.dom,
+          tagName: "input",
+          id: undefined,
+          classNames: [],
+          text: undefined,
+          accessibleName: "이메일",
+          attributes: { type: "email", placeholder: "you@example.com" },
+        },
+        source: { stack: [], confidence: "unknown" },
+      }),
+    ).toEqual({
+      elementLabel: "<input> 이메일",
+      sourceCandidates: [],
+      copyText: '[<input type="email" placeholder="you@example.com">]',
+    });
   });
 });
 
