@@ -419,6 +419,93 @@ export const overlayStyles = String.raw`
     white-space: nowrap;
   }
 
+  .target-readout {
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .target-source-line {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(84px, auto);
+    align-items: baseline;
+    gap: 8px;
+    min-height: 25px;
+  }
+
+  .target-source-line strong,
+  .target-source-line span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .target-source-line strong {
+    font: 650 11px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+
+  .target-source-line span {
+    max-width: 164px;
+    color: var(--muted);
+    font-size: 10px;
+    text-align: right;
+  }
+
+  .target-source-line[data-pending="true"] strong {
+    font-family: inherit;
+  }
+
+  .target-details {
+    border-top: 1px dashed #c8c0b2;
+  }
+
+  .target-details summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 28px;
+    padding: 5px 1px 0;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 650;
+  }
+
+  .target-details summary span {
+    margin-left: auto;
+    color: var(--muted);
+    font-weight: 400;
+  }
+
+  .target-detail-body {
+    padding-top: 7px;
+  }
+
+  .target-detail-body code {
+    display: block;
+    max-height: 112px;
+    overflow: auto;
+    color: #4f4f49;
+    font: 10px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
+  .target-copy-row {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 7px;
+  }
+
+  .copy-status {
+    min-width: 0;
+    color: var(--muted);
+    font-size: 10px;
+  }
+
   .request-field {
     display: block;
     width: 100%;
@@ -853,6 +940,11 @@ export const overlayStyles = String.raw`
     }
 
     .request-meta .primary {
+      min-height: 44px;
+    }
+
+    .target-details summary,
+    .target-copy {
       min-height: 44px;
     }
 

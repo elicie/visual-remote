@@ -1,4 +1,6 @@
 /** Browser-only geometry and input helpers. */
+import type { SourceLocation, TargetContext } from "@visual-remote/protocol";
+
 export interface Point {
   x: number;
   y: number;
@@ -25,6 +27,139 @@ export interface PopoverPosition {
 export interface PairingFragment {
   token: string | null;
   remainingHash: string;
+}
+
+export interface TargetSourceDisplay {
+  componentName?: string;
+  location: string;
+}
+
+export interface TargetDisplayContext {
+  elementLabel: string;
+  componentPath?: string;
+  primarySource?: string;
+  sourceCandidates: TargetSourceDisplay[];
+  copyText: string;
+}
+
+const VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
+
+function escapeMarkup(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function sourceLocation(source: SourceLocation, short = false): string {
+  const filePath = short
+    ? source.filePath.split(/[\\/]/).filter(Boolean).at(-1) ?? source.filePath
+    : source.filePath;
+  const line = source.lineNumber ? `:${source.lineNumber}` : "";
+  const column = source.columnNumber ? `:${source.columnNumber}` : "";
+  return `${filePath}${line}${column}`;
+}
+
+function sourceCandidates(target: TargetContext): SourceLocation[] {
+  const candidates = [
+    ...(target.source.primary ? [target.source.primary] : []),
+    ...target.source.stack,
+  ];
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = [
+      candidate.filePath,
+      candidate.lineNumber ?? 0,
+      candidate.columnNumber ?? 0,
+      candidate.componentName ?? "",
+    ].join(":");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function elementSnippet(target: TargetContext): string {
+  const { dom } = target;
+  const attributes: string[] = [];
+  const type = dom.attributes.type;
+  if (type) attributes.push(`type="${escapeMarkup(type)}"`);
+  if (dom.id) attributes.push(`id="${escapeMarkup(dom.id)}"`);
+  if (dom.classNames.length > 0) {
+    attributes.push(
+      `class="${escapeMarkup(compactText(dom.classNames.join(" "), 120))}"`,
+    );
+  }
+  for (const [name, value] of Object.entries(dom.attributes).sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    if (
+      name === "type"
+      || name.startsWith("data-source")
+      || name === "data-react-source"
+      || name === "data-component"
+      || name === "data-component-name"
+    ) {
+      continue;
+    }
+    attributes.push(`${name}="${escapeMarkup(value)}"`);
+  }
+
+  const tagName = dom.tagName.toLowerCase();
+  const opening = `<${tagName}${attributes.length > 0 ? ` ${attributes.join(" ")}` : ""}>`;
+  if (VOID_ELEMENTS.has(tagName)) return opening;
+  const text = compactText(dom.text ?? dom.accessibleName ?? "", 120);
+  return `${opening}${escapeMarkup(text)}</${tagName}>`;
+}
+
+export function describeTarget(target: TargetContext): TargetDisplayContext {
+  const candidates = sourceCandidates(target);
+  const closestComponents = candidates
+    .map((candidate) => candidate.componentName)
+    .filter((name): name is string => Boolean(name))
+    .filter((name, index, all) => all.indexOf(name) === index);
+  const primary = target.source.primary ?? candidates[0];
+  const label = compactText(
+    target.dom.accessibleName ?? target.dom.text ?? "",
+    80,
+  );
+  const elementLabel = `<${target.dom.tagName.toLowerCase()}>${label ? ` ${label}` : ""}`;
+  const displayCandidates = candidates.map((candidate) => ({
+    ...(candidate.componentName ? { componentName: candidate.componentName } : {}),
+    location: sourceLocation(candidate),
+  }));
+  let copyText = elementSnippet(target);
+  for (const candidate of displayCandidates) {
+    copyText += candidate.componentName
+      ? ` in ${candidate.componentName} (at ${candidate.location})`
+      : ` at ${candidate.location}`;
+  }
+
+  return {
+    elementLabel,
+    ...(closestComponents.length > 0
+      ? { componentPath: [...closestComponents].reverse().join(" › ") }
+      : {}),
+    ...(primary ? { primarySource: sourceLocation(primary, true) } : {}),
+    sourceCandidates: displayCandidates,
+    copyText: `[${copyText}]`,
+  };
 }
 
 export function clamp(value: number, minimum: number, maximum: number): number {

@@ -55,6 +55,7 @@ import {
 import {
   calculatePopoverPosition,
   compactText,
+  describeTarget,
   normalizeRect,
   parsePairingFragment,
   shouldSubmitOnEnter,
@@ -166,6 +167,41 @@ function sourceLabel(item: SelectionItem | undefined): string {
   return `${dom.tagName}${detail} · source unknown`;
 }
 
+function elementLabel(item: SelectionItem | undefined): string {
+  if (!item) return "현재 페이지";
+  if (item.context) return describeTarget(item.context).elementLabel;
+
+  const tagName = item.element.tagName.toLowerCase();
+  const label = compactText(
+    item.element.getAttribute("aria-label") ?? item.element.innerText ?? "",
+    80,
+  );
+  return `<${tagName}>${label ? ` ${label}` : ""}`;
+}
+
+async function writeClipboardText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Fall through for non-secure origins and restricted clipboard policies.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.readOnly = true;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Clipboard copy was rejected");
+}
+
 function verificationLabel(value: string | undefined): string {
   switch (value) {
     case "passed":
@@ -245,12 +281,49 @@ function RequestStrip({
   onSubmit: () => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const copyButtonRef = useRef<HTMLButtonElement>(null);
+  const copyResetRef = useRef<number | undefined>(undefined);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const first = selection[0];
   const pendingCount = selection.filter((item) => !item.context).length;
+  const targetDisplay = useMemo(
+    () => mode === "element" && first?.context ? describeTarget(first.context) : undefined,
+    [first?.context, mode],
+  );
 
   useEffect(() => {
     textareaRef.current?.focus();
   }, []);
+
+  useEffect(() => {
+    setCopyState("idle");
+    if (copyResetRef.current !== undefined) {
+      window.clearTimeout(copyResetRef.current);
+      copyResetRef.current = undefined;
+    }
+  }, [targetDisplay?.copyText]);
+
+  useEffect(() => () => {
+    if (copyResetRef.current !== undefined) {
+      window.clearTimeout(copyResetRef.current);
+    }
+  }, []);
+
+  const copyTargetContext = async (): Promise<void> => {
+    if (!targetDisplay) return;
+    try {
+      await writeClipboardText(targetDisplay.copyText);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    } finally {
+      copyButtonRef.current?.focus();
+      if (copyResetRef.current !== undefined) {
+        window.clearTimeout(copyResetRef.current);
+      }
+      copyResetRef.current = window.setTimeout(() => setCopyState("idle"), 1_800);
+    }
+  };
 
   const handleKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLTextAreaElement>) => {
     if (
@@ -277,7 +350,11 @@ function RequestStrip({
     >
       <header class="strip-head">
         <span class="strip-title">
-          {mode === "region" ? "드래그한 화면 영역" : sourceLabel(first)}
+          {mode === "region"
+            ? "드래그한 화면 영역"
+            : mode === "element"
+              ? elementLabel(first)
+              : sourceLabel(first)}
         </span>
         <span class="strip-code machine">
           {mode === "element"
@@ -290,24 +367,76 @@ function RequestStrip({
         </span>
       </header>
       <div class="strip-body">
-        <div class="selection-readout">
-          <strong>
-            {mode === "page"
-              ? "현재 페이지 컨텍스트"
-              : mode === "region"
-                ? "영역 선택됨"
-                : `${selection.length}개 대상 선택`}
-          </strong>
-          <span>
-            {pendingCount > 0
-              ? mode === "region"
-                ? `범위 안 요소 ${pendingCount}개 확인 중`
-                : `소스 ${pendingCount}개 확인 중`
-              : mode === "region"
-                ? `범위 안 요소 ${selection.length}개 포함`
-                : "컨텍스트 준비됨"}
-          </span>
-        </div>
+        {mode === "element" ? (
+          <div class="target-readout">
+            {targetDisplay ? (
+              <>
+                <div class="target-source-line">
+                  <strong title={targetDisplay.componentPath ?? "컴포넌트 미확인"}>
+                    {targetDisplay.componentPath ?? "컴포넌트 미확인"}
+                  </strong>
+                  <span class="machine" title={targetDisplay.primarySource ?? "source unknown"}>
+                    {targetDisplay.primarySource ?? "source unknown"}
+                  </span>
+                </div>
+                <details class="target-details">
+                  <summary>
+                    전체 선택 컨텍스트
+                    <span class="machine">
+                      {targetDisplay.sourceCandidates.length > 0
+                        ? `SOURCE ${targetDisplay.sourceCandidates.length}`
+                        : "DOM ONLY"}
+                    </span>
+                  </summary>
+                  <div class="target-detail-body">
+                    <code>{targetDisplay.copyText}</code>
+                    <div class="target-copy-row">
+                      <span class="copy-status" role="status" aria-live="polite">
+                        {copyState === "copied"
+                          ? "클립보드에 복사됨"
+                          : copyState === "failed"
+                            ? "복사할 수 없습니다"
+                            : ""}
+                      </span>
+                      <button
+                        ref={copyButtonRef}
+                        type="button"
+                        class="quiet target-copy"
+                        onClick={() => void copyTargetContext()}
+                      >
+                        {copyState === "copied" ? "복사됨" : "컨텍스트 복사"}
+                      </button>
+                    </div>
+                  </div>
+                </details>
+              </>
+            ) : (
+              <div class="target-source-line" data-pending="true">
+                <strong>선택 요소 확인됨</strong>
+                <span>소스 위치 확인 중…</span>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div class="selection-readout">
+            <strong>
+              {mode === "page"
+                ? "현재 페이지 컨텍스트"
+                : mode === "region"
+                  ? "영역 선택됨"
+                  : `${selection.length}개 대상 선택`}
+            </strong>
+            <span>
+              {pendingCount > 0
+                ? mode === "region"
+                  ? `범위 안 요소 ${pendingCount}개 확인 중`
+                  : `소스 ${pendingCount}개 확인 중`
+                : mode === "region"
+                  ? `범위 안 요소 ${selection.length}개 포함`
+                  : "컨텍스트 준비됨"}
+            </span>
+          </div>
+        )}
         <label class="visually-hidden" for="visual-request">
           수정 요청
         </label>
