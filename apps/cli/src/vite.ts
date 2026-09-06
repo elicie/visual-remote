@@ -22,12 +22,71 @@ interface ViteBridgeReference {
   ownedBridge?: RunningBridge;
 }
 
-function projectRoot(config: UserConfig, configuredRoot?: string): string {
+interface SharedViteBridge {
+  bridge: Promise<ViteBridgeReference>;
+  users: number;
+  closing?: Promise<void>;
+}
+
+interface ViteBridgeLease {
+  bridge: ViteBridgeReference;
+  release(): Promise<void>;
+}
+
+// Config reloads can evaluate another copy of this module before the old server closes.
+const bridgesKey = Symbol.for("visual-remote.vite.bridges");
+const bridgeState = globalThis as typeof globalThis & {
+  [bridgesKey]?: Map<string, SharedViteBridge>;
+};
+const bridges = bridgeState[bridgesKey] ??= new Map<string, SharedViteBridge>();
+
+async function acquireBridge(
+  options: VisualRemoteViteOptions,
+  config: Pick<UserConfig, "root" | "server">,
+): Promise<ViteBridgeLease> {
+  const root = projectRoot(config, options.cwd);
+  let shared = bridges.get(root);
+  if (shared?.closing !== undefined) {
+    await shared.closing;
+    return acquireBridge(options, config);
+  }
+  if (shared === undefined) {
+    shared = { bridge: startOrReuseBridge(options, config), users: 0 };
+    bridges.set(root, shared);
+  }
+  const entry = shared;
+  entry.users += 1;
+  let releasePromise: Promise<void> | undefined;
+  const release = (): Promise<void> => {
+    releasePromise ??= (async () => {
+      entry.users -= 1;
+      if (entry.users !== 0) return;
+      entry.closing = (async () => {
+        try {
+          const bridge = await entry.bridge.catch(() => undefined);
+          await bridge?.ownedBridge?.close();
+        } finally {
+          bridges.delete(root);
+        }
+      })();
+      await entry.closing;
+    })();
+    return releasePromise;
+  };
+  try {
+    return { bridge: await entry.bridge, release };
+  } catch (error) {
+    await release();
+    throw error;
+  }
+}
+
+function projectRoot(config: Pick<UserConfig, "root">, configuredRoot?: string): string {
   if (configuredRoot !== undefined) return resolve(configuredRoot);
   return resolve(process.cwd(), typeof config.root === "string" ? config.root : ".");
 }
 
-function upstreamUrl(config: UserConfig): string {
+function upstreamUrl(config: Pick<UserConfig, "server">): string {
   const protocol = config.server?.https ? "https" : "http";
   const port = config.server?.port ?? 5173;
   return `${protocol}://127.0.0.1:${port}`;
@@ -46,7 +105,7 @@ function isLiveBridgeInstance(
 
 async function startOrReuseBridge(
   options: VisualRemoteViteOptions,
-  config: UserConfig,
+  config: Pick<UserConfig, "root" | "server">,
 ): Promise<ViteBridgeReference> {
   const cwd = projectRoot(config, options.cwd);
   try {
@@ -77,34 +136,12 @@ async function startOrReuseBridge(
 }
 
 export function visualRemote(options: VisualRemoteViteOptions = {}): Plugin {
-  let bridgePromise: Promise<ViteBridgeReference> | undefined;
   let pairingUrlAnnounced = false;
-
-  const closeBridge = async (): Promise<void> => {
-    if (bridgePromise === undefined) return;
-    const bridge = await bridgePromise.catch(() => undefined);
-    await bridge?.ownedBridge?.close();
-  };
 
   return {
     name: "visual-remote",
     apply: "serve",
     enforce: "pre",
-    async config(config) {
-      bridgePromise ??= startOrReuseBridge(options, config);
-      const bridge = await bridgePromise;
-      bridge.ownedBridge?.gateway.server.unref();
-      return {
-        server: {
-          proxy: {
-            "/_visual": {
-              target: bridge.gatewayUrl,
-              ws: true,
-            },
-          },
-        },
-      };
-    },
     transformIndexHtml: {
       order: "pre",
       handler(html) {
@@ -120,23 +157,35 @@ export function visualRemote(options: VisualRemoteViteOptions = {}): Plugin {
         ];
       },
     },
-    configureServer(server) {
-      if (!pairingUrlAnnounced && bridgePromise !== undefined) {
+    async configureServer(server) {
+      // Each server owns a lease, even when restart reuses this plugin object.
+      const serverLease = await acquireBridge(options, server.config);
+      const { bridge } = serverLease;
+      bridge.ownedBridge?.gateway.server.unref();
+      server.config.server.proxy ??= {};
+      server.config.server.proxy["/_visual"] = {
+        target: bridge.gatewayUrl,
+        ws: true,
+      };
+      if (!pairingUrlAnnounced) {
         pairingUrlAnnounced = true;
-        void bridgePromise.then((bridge) => {
-          server.config.logger.info(
-            bridge.openUrl === undefined
-              ? `[visual-remote] Reusing Bridge: ${bridge.gatewayUrl}`
-              : `[visual-remote] Pair: ${bridge.openUrl}`,
-          );
-        });
+        server.config.logger.info(
+          bridge.openUrl === undefined
+            ? `[visual-remote] Reusing Bridge: ${bridge.gatewayUrl}`
+            : `[visual-remote] Pair: ${bridge.openUrl}`,
+        );
       }
+      const close = server.close;
+      server.close = async () => {
+        try {
+          await close();
+        } finally {
+          await serverLease?.release();
+        }
+      };
       server.httpServer?.once("close", () => {
-        void closeBridge();
+        void serverLease?.release();
       });
-    },
-    async closeBundle() {
-      await closeBridge();
     },
   };
 }

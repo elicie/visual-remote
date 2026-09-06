@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { expect, test, type APIRequestContext } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page, type WebSocketRoute } from "@playwright/test";
 import { findAvailablePort } from "@visual-remote/bridge-core";
 
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -361,3 +361,136 @@ test("standalone viewer covers bootstrap, live review, read-only access, and mob
 
   expect(browserErrors).toEqual([]);
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function overlayTask(id: string, sessionId: string, status = "review") {
+  return {
+    id,
+    projectId: "browser-fixture",
+    originBrowserSessionId: sessionId,
+    requestText: `Overlay race ${id}`,
+    scope: "page",
+    status,
+    changedFiles: [],
+    createdAt: new Date().toISOString(),
+  };
+}
+
+async function routeOverlaySocket(page: Page, sessionId: string) {
+  const connected = deferred<WebSocketRoute>();
+  await page.addInitScript((id) => {
+    sessionStorage.setItem("visual-bridge:browser-session", id);
+    sessionStorage.removeItem("visual-bridge:last-sequence");
+  }, sessionId);
+  await page.routeWebSocket("**/_visual/ws", (socket) => {
+    socket.onMessage((raw) => {
+      const message = JSON.parse(String(raw)) as { type: string };
+      if (message.type === "auth") {
+        socket.send(JSON.stringify({ type: "auth.ok", projectId: "browser-fixture" }));
+      }
+      if (message.type === "browser.hello") connected.resolve(socket);
+    });
+  });
+  await page.route("**/_visual/api/tasks/*/files", (route) => route.fulfill({ json: [] }));
+  await page.route("**/_visual/api/tasks/*/logs", (route) => route.fulfill({ json: [] }));
+  await page.route("**/_visual/api/tasks/*/diff", (route) => route.fulfill({ json: { diff: "" } }));
+  return { connected: connected.promise };
+}
+
+for (const hydration of ["snapshot", "empty", "failed"] as const) {
+  test(`overlay reconciles completion during ${hydration} hydration`, async ({ page }) => {
+    const sessionId = randomUUID();
+    const task = overlayTask("hydrated-task", sessionId, "running_agent");
+    const releaseSnapshot = deferred<void>();
+    const snapshotRequested = deferred<void>();
+    await page.route("**/_visual/api/tasks", async (route) => {
+      snapshotRequested.resolve();
+      await releaseSnapshot.promise;
+      await route.fulfill({
+        status: hydration === "failed" ? 503 : 200,
+        json: hydration === "snapshot" ? [task] : [],
+      });
+    });
+    // Do not await the socket until the page that opens it has loaded.
+    const socketReady = await routeOverlaySocket(page, sessionId);
+    await page.goto(`${fixture.origin}/#visual-pair=${controlToken}`);
+    const socket = await socketReady.connected;
+    await snapshotRequested.promise;
+    socket.send(JSON.stringify({
+      type: "task.completed", seq: 1, taskId: task.id,
+      payload: { ...task, status: "review" },
+    }));
+    await expect.poll(() => page.evaluate(() => sessionStorage.getItem("visual-bridge:last-sequence"))).toBe("1");
+    releaseSnapshot.resolve();
+    const strip = page.locator("#visual-task-strip");
+    await expect(strip.locator(".phase-mark")).toHaveAttribute("data-state", "review");
+    await expect(strip.getByRole("button", { name: "변경 유지", exact: true })).toBeEnabled();
+    socket.send(JSON.stringify({
+      type: "task.log", seq: 2, taskId: task.id, payload: { message: "single live log" },
+    }));
+    socket.send(JSON.stringify({
+      type: "task.log", seq: 2, taskId: task.id, payload: { message: "single live log" },
+    }));
+    await expect(strip.locator(".log-summary li", { hasText: "single live log" })).toHaveCount(1);
+  });
+}
+
+for (const outcome of ["success", "error"] as const) {
+  for (const newerAction of [false, true]) {
+    test(`overlay isolates delayed A ${outcome} with B action ${newerAction}`, async ({ page }) => {
+      const sessionId = randomUUID();
+      const taskA = overlayTask("task-a", sessionId);
+      const taskB = overlayTask("task-b", sessionId);
+      await page.route("**/_visual/api/tasks", (route) => route.fulfill({ json: [taskA] }));
+      const releaseA = deferred<void>();
+      const requestedA = deferred<void>();
+      const releaseB = deferred<void>();
+      const requestedB = deferred<void>();
+      await page.route("**/_visual/api/tasks/task-a/accept", async (route) => {
+        requestedA.resolve();
+        await releaseA.promise;
+        await route.fulfill({ status: outcome === "success" ? 200 : 409, json: { message: "old A response" } });
+      });
+      await page.route("**/_visual/api/tasks/task-b/accept", async (route) => {
+        requestedB.resolve();
+        await releaseB.promise;
+        await route.fulfill({ json: {} });
+      });
+      const socketReady = await routeOverlaySocket(page, sessionId);
+      await page.goto(`${fixture.origin}/#visual-pair=${controlToken}`);
+      const socket = await socketReady.connected;
+      const strip = page.locator("#visual-task-strip");
+      const accept = strip.getByRole("button", { name: "변경 유지", exact: true });
+      await accept.click();
+      await requestedA.promise;
+      socket.send(JSON.stringify({ type: "task.queued", seq: 1, taskId: taskB.id, payload: taskB }));
+      await expect(strip.locator(".strip-title")).toHaveText(taskB.requestText);
+      await expect(accept).toBeEnabled();
+      if (newerAction) {
+        await accept.click();
+        await requestedB.promise;
+        await expect(accept).toBeDisabled();
+      }
+      const responseA = page.waitForResponse("**/_visual/api/tasks/task-a/accept");
+      releaseA.resolve();
+      await (await responseA).finished();
+      // A later socket event is an observable barrier after the action response.
+      socket.send(JSON.stringify({ type: "task.log", seq: 2, taskId: taskB.id, payload: { message: "B remains current" } }));
+      await expect(strip.locator(".log-summary")).toHaveText("B remains current");
+      await expect(strip.locator(".phase-mark")).toHaveAttribute("data-state", "review");
+      await expect(strip.getByRole("alert")).toHaveCount(0);
+      if (newerAction) {
+        await expect(accept).toBeDisabled();
+        releaseB.resolve();
+        await expect(strip.locator(".phase-mark")).toHaveAttribute("data-state", "accepted");
+      } else {
+        await expect(accept).toBeEnabled();
+      }
+    });
+  }
+}

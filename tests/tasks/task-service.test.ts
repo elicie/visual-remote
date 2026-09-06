@@ -1,6 +1,6 @@
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AgentCanceledError,
@@ -313,6 +313,136 @@ describe("TaskService", () => {
     ).resolves.toBe("base\n");
     expect(service.get(interrupted.id)?.status).toBe("reverted");
     await service.close();
+  });
+
+  it.each([false, true])("preserves a persisted after snapshot during recovery (missing ref: %s)", async (missingRef) => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const manager = await GitTransactionManager.open(fixture.root);
+    const guard = await manager.captureGuard();
+    const before = await manager.createSnapshot("snapshotted-task", "before");
+    await fixture.write("tracked.txt", "completed agent write\n");
+    const after = await manager.createSnapshot("snapshotted-task", "after");
+    const database = resolve(fixture.parent, "state.sqlite");
+    const initialStore = new SqliteTaskStore(database);
+    initialStore.createTask({
+      id: "snapshotted-task",
+      projectId: "fixture-project",
+      status: "diffing",
+      requestText: "recover a completed snapshot",
+      scope: "page",
+      originBrowserSessionId: context("recover").browserSessionId,
+      agentAdapter: "fake",
+      contextBundle: context("recover"),
+      changedFiles: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      beforeRef: before.ref,
+      afterRef: after.ref,
+      preHead: guard.head,
+      preIndexTree: guard.indexTree,
+      preRestrictedFingerprint: guard.restrictedFingerprint,
+    });
+    initialStore.close();
+    if (missingRef) await fixture.git(["update-ref", "-d", after.ref]);
+    await fixture.write("tracked.txt", "user edit after snapshot\n");
+    const adapter = new FakeAgentAdapter();
+    const service = new TaskService({
+      projectId: "fixture-project",
+      adapter,
+      store: new SqliteTaskStore(database),
+      git: manager,
+    });
+    await service.waitForIdle();
+
+    expect(adapter.runs).toHaveLength(0);
+    expect(service.get("snapshotted-task")).toMatchObject({
+      status: missingRef ? "unsafe" : "failed",
+      beforeRef: before.ref,
+      afterRef: after.ref,
+      error: { code: missingRef ? "RECOVERY_FINALIZATION_FAILED" : "BRIDGE_INTERRUPTED" },
+    });
+    expect(await fixture.git(["rev-parse", before.ref])).toBe(before.commit);
+    if (missingRef) {
+      await expect(fixture.git(["rev-parse", "--verify", after.ref])).rejects.toThrow();
+    } else {
+      expect(await fixture.git(["rev-parse", after.ref])).toBe(after.commit);
+      expect(service.diff("snapshotted-task")).toContain("+completed agent write");
+      expect(service.diff("snapshotted-task")).not.toContain("user edit after snapshot");
+    }
+    await expect(service.revert("snapshotted-task")).rejects.toMatchObject({
+      code: missingRef ? "TASK_NOT_REVERTIBLE" : "REVERT_CONFLICT",
+    });
+    expect(await readFile(resolve(fixture.root, "tracked.txt"), "utf8")).toBe(
+      "user edit after snapshot\n",
+    );
+    await service.close();
+  });
+
+  it.each(["success", "conflict", "close"] as const)("holds the writer through revert and releases it on %s", async (outcome) => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const manager = await GitTransactionManager.open(fixture.root);
+    const adapter = new FakeAgentAdapter(async function* () {
+      await fixture.write("tracked.txt", "agent write\n");
+      yield { type: "complete" };
+    });
+    const store = new SqliteTaskStore(resolve(fixture.parent, "state.sqlite"));
+    const service = new TaskService({
+      projectId: "fixture-project",
+      adapter,
+      store,
+      git: manager,
+    });
+    const first = service.create(context("first"));
+    await service.waitForIdle();
+    let releaseRevert!: () => void;
+    const gate = new Promise<void>((resolveWait) => { releaseRevert = resolveWait; });
+    const originalRevert = manager.revert.bind(manager);
+    const revertSpy = vi.spyOn(manager, "revert").mockImplementationOnce(async (...args) => {
+      await gate;
+      return await originalRevert(...args);
+    });
+    const reverting = service.revert(first.id);
+    const result = outcome === "conflict"
+      ? expect(reverting).rejects.toMatchObject({ code: "REVERT_CONFLICT" })
+      : expect(reverting).resolves.toMatchObject({ status: "reverted" });
+    await expect(service.revert(first.id)).rejects.toMatchObject({ code: "WRITER_BUSY" });
+    expect(revertSpy).toHaveBeenCalledTimes(1);
+    const second = service.create(context("second", 2));
+    expect(service.get(second.id)?.status).toBe("queued");
+    expect(adapter.runs).toHaveLength(1);
+    let idle = false;
+    const idlePromise = service.waitForIdle().then(() => { idle = true; });
+    let closed = false;
+    const closeSpy = vi.spyOn(store, "close");
+    const closing = outcome === "close"
+      ? service.close().then(() => { closed = true; })
+      : undefined;
+    if (outcome === "conflict") await fixture.write("tracked.txt", "user edit\n");
+    await Promise.resolve();
+    expect(idle).toBe(false);
+    expect(closed).toBe(false);
+    expect(closeSpy).not.toHaveBeenCalled();
+    if (outcome === "close") {
+      expect(service.get(second.id)?.status).toBe("canceled");
+      await expect(service.revert(first.id)).rejects.toMatchObject({ code: "SERVICE_CLOSED" });
+    }
+
+    releaseRevert();
+    await result;
+    await idlePromise;
+    if (closing) {
+      await closing;
+      expect(adapter.runs).toHaveLength(1);
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      expect(await readFile(resolve(fixture.root, "tracked.txt"), "utf8")).toBe("base\n");
+    } else {
+      expect(adapter.runs).toHaveLength(2);
+      expect(service.get(second.id)?.status).toBe("review");
+      expect(service.get(first.id)?.status).toBe(outcome === "conflict" ? "review" : "reverted");
+      expect(service.diff(second.id)).toContain(outcome === "conflict" ? "-user edit" : "-base");
+      await service.close();
+    }
   });
 
   it("marks recovered changes unsafe when the persisted restricted guard changed", async () => {

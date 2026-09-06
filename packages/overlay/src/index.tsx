@@ -705,6 +705,8 @@ function Overlay({ host }: { host: HTMLElement }) {
   const selectedRef = useRef<SelectionItem[]>([]);
   const requestTextRef = useRef("");
   const activeTaskIdRef = useRef<string | undefined>(undefined);
+  const pendingActionRef = useRef<{ taskId: string } | null>(null);
+  const mountedRef = useRef(true);
   const lastContextBundleRef = useRef<ContextBundle | null>(null);
   const dragStartRef = useRef<Point | null>(null);
   const compositionRef = useRef(false);
@@ -734,7 +736,8 @@ function Overlay({ host }: { host: HTMLElement }) {
   const [taskPanelHidden, setTaskPanelHidden] = useState(false);
   const [followUpOpen, setFollowUpOpen] = useState(false);
   const [followUpText, setFollowUpText] = useState("");
-  const [busyAction, setBusyAction] = useState(false);
+  const [pendingAction, setPendingAction] = useState<{ taskId: string } | null>(null);
+  const busyAction = pendingAction !== null && pendingAction.taskId === task?.id;
   const [popoverPosition, setPopoverPosition] = useState<PopoverPosition>({
     left: 12,
     top: 64,
@@ -771,6 +774,7 @@ function Overlay({ host }: { host: HTMLElement }) {
   const loadArtifacts = useCallback(
     async (taskId: string) => {
       const artifacts = await fetchTaskArtifacts(token, taskId);
+      if (!mountedRef.current) return;
       setTask((current) =>
         current?.id === taskId
           ? {
@@ -898,30 +902,42 @@ function Overlay({ host }: { host: HTMLElement }) {
   );
 
   useEffect(() => {
+    let active = true;
+    mountedRef.current = true;
+    let hydrating = true;
+    const bufferedEvents: ServerEvent[] = [];
     const bridge = new BridgeConnection({
       token,
       browserSessionId,
       getPageState: pageState,
       onSnapshot: (snapshot) => {
+        if (!active) return;
         setConnection(snapshot);
         if (snapshot.projectId) {
           setProjectId(snapshot.projectId);
         }
       },
-      onEvent: handleServerEvent,
+      onEvent: (event) => {
+        if (!active) return;
+        if (hydrating) {
+          bufferedEvents.push(event);
+        } else {
+          handleServerEvent(event);
+        }
+      },
     });
     connectionRef.current = bridge;
     bridge.connect();
     void fetchProjectId(token)
       .then((id) => {
-        if (id) {
+        if (active && id) {
           setProjectId(id);
         }
       })
       .catch(() => undefined);
     void fetchLatestTaskForSession(token, browserSessionId)
       .then((latestTask) => {
-        if (!latestTask) {
+        if (!active || !latestTask) {
           return;
         }
         setTask((current) => {
@@ -946,9 +962,31 @@ function Overlay({ host }: { host: HTMLElement }) {
         });
         void loadArtifacts(latestTask.id);
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        hydrating = false;
+        if (active) {
+          if (!activeTaskIdRef.current) {
+            for (const event of bufferedEvents) {
+              const record = taskFromEvent(event);
+              if (record?.originBrowserSessionId === browserSessionId) {
+                activeTaskIdRef.current = record.id;
+                break;
+              }
+            }
+          }
+          for (const event of bufferedEvents) {
+            handleServerEvent(event);
+          }
+        }
+        bufferedEvents.length = 0;
+      });
 
     return () => {
+      active = false;
+      mountedRef.current = false;
+      bufferedEvents.length = 0;
+      pendingActionRef.current = null;
       bridge.close();
       connectionRef.current = null;
     };
@@ -1521,14 +1559,17 @@ function Overlay({ host }: { host: HTMLElement }) {
 
   const runTaskAction = useCallback(
     async (action: "accept" | "revert" | "cancel") => {
-      if (!task?.id) {
+      if (!task?.id || pendingActionRef.current?.taskId === task.id) {
         return;
       }
-      setBusyAction(true);
+      const request = { taskId: task.id };
+      pendingActionRef.current = request;
+      setPendingAction(request);
       try {
-        await postTaskAction(token, task.id, action);
+        await postTaskAction(token, request.taskId, action);
+        if (pendingActionRef.current !== request) return;
         setTask((current) =>
-          current
+          current?.id === request.taskId
             ? {
                 ...current,
                 status:
@@ -1549,8 +1590,9 @@ function Overlay({ host }: { host: HTMLElement }) {
             : current,
         );
       } catch (error) {
+        if (pendingActionRef.current !== request) return;
         setTask((current) =>
-          current
+          current?.id === request.taskId
             ? {
                 ...current,
                 error:
@@ -1561,7 +1603,10 @@ function Overlay({ host }: { host: HTMLElement }) {
             : current,
         );
       } finally {
-        setBusyAction(false);
+        if (pendingActionRef.current === request) {
+          pendingActionRef.current = null;
+          setPendingAction((current) => current === request ? null : current);
+        }
       }
     },
     [task?.id, token],

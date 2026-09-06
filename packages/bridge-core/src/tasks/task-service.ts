@@ -351,6 +351,7 @@ export class TaskService {
   }
 
   async revert(id: string): Promise<TaskRecord> {
+    if (this.#closed) throw new TaskServiceError("SERVICE_CLOSED", "Task service is closed");
     if (
       this.#activeTaskId ||
       this.#recovering ||
@@ -370,12 +371,19 @@ export class TaskService {
     if (!latest || latest.id !== id) {
       throw new TaskServiceError("NOT_LATEST_TASK", "Only the latest completed task can be reverted");
     }
-    await this.#git.revert(id, task.beforeRef, task.afterRef);
-    const reverted = this.#transition(id, "reverted", {
-      completedAt: this.#now().toISOString(),
-    });
-    this.#emit("task.reverted", { task: publicTask(reverted) }, id);
-    return publicTask(reverted);
+    this.#activeTaskId = id;
+    try {
+      await this.#git.revert(id, task.beforeRef, task.afterRef);
+      const reverted = this.#transition(id, "reverted", {
+        completedAt: this.#now().toISOString(),
+      });
+      this.#emit("task.reverted", { task: publicTask(reverted) }, id);
+      return publicTask(reverted);
+    } finally {
+      this.#activeTaskId = undefined;
+      if (!this.#closed) void this.#drain();
+      this.#resolveIdleIfNeeded();
+    }
   }
 
   async waitForIdle(): Promise<void> {
@@ -394,7 +402,7 @@ export class TaskService {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    if (this.#activeTaskId && !this.#recovering) {
+    if (this.#activeTaskId && this.#activeAbort) {
       this.#cancelRequested.add(this.#activeTaskId);
       this.#activeAbort?.abort(new AgentCanceledError("Task service is closing"));
     }
@@ -463,9 +471,13 @@ export class TaskService {
         throw new Error("Interrupted task is missing its before snapshot");
       }
 
-      const after = await this.#git.createSnapshot(taskId, "after");
-      this.#store.updateTask(taskId, { afterRef: after.ref });
-      const diff = await this.#git.diff(task.beforeRef, after.ref);
+      let afterRef = task.afterRef;
+      if (!afterRef) {
+        afterRef = (await this.#git.createSnapshot(taskId, "after")).ref;
+        this.#store.updateTask(taskId, { afterRef });
+      }
+      // diff validates persisted refs without replacing the completed snapshot.
+      const diff = await this.#git.diff(task.beforeRef, afterRef);
       this.#store.updateTask(taskId, {
         diffText: diff.text,
         changedFiles: diff.files,
@@ -548,6 +560,7 @@ export class TaskService {
   async #drain(): Promise<void> {
     if (
       this.#draining ||
+      this.#activeTaskId ||
       this.#closed ||
       this.#recovering ||
       this.#recoveryQueue.length > 0
