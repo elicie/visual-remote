@@ -68,6 +68,8 @@ describe("Visual Remote Vite integration", () => {
     let configureCalls = 0;
     const restartErrors: string[] = [];
     const logger = createLogger("silent");
+    const announcements: string[] = [];
+    logger.info = (message) => { announcements.push(message); };
     logger.error = (message) => { restartErrors.push(message); };
     const apiFixture: Plugin = {
       name: "api-fixture",
@@ -113,6 +115,18 @@ describe("Visual Remote Vite integration", () => {
       expect(await responseStatus(`${origin}/@vite/client`)).toBe(200);
       expect(await responseStatus(`${origin}/_visual/client.js`)).toBe(200);
       expect(await responseStatus(`${origin}/_visual/viewer`)).toBe(200);
+      expect(announcements).toContain(`[visual-remote] Open: ${origin}/`);
+      for (const appOrigin of [origin, `http://localhost:${appPort}`]) {
+        const bootstrap = await fetch(`${origin}/_visual/bootstrap`, {
+          headers: { Origin: appOrigin },
+        });
+        expect(bootstrap.status).toBe(200);
+        expect(await bootstrap.json()).toMatchObject({ authMode: "local" });
+      }
+      const untrusted = await fetch(`${origin}/_visual/bootstrap`, {
+        headers: { Origin: `http://localhost:${appPort + 2}` },
+      });
+      expect(untrusted.status).toBe(403);
       const originalInstance = await readInstance(root);
       expect(originalInstance?.gatewayUrl).toBe(`http://127.0.0.1:${bridgePort}`);
       if (failure !== "none") {
@@ -197,6 +211,17 @@ describe("Visual Remote Vite integration", () => {
       expect(await responseStatus(`http://127.0.0.1:${appPort}/_visual/client.js`)).toBe(
         200,
       );
+      for (const origin of [`http://127.0.0.1:${appPort}`, `http://localhost:${appPort}`]) {
+        const bootstrap = await fetch(`http://127.0.0.1:${appPort}/_visual/bootstrap`, {
+          headers: { Origin: origin },
+        });
+        expect(bootstrap.status).toBe(200);
+        expect(await bootstrap.json()).toMatchObject({ authMode: "local" });
+      }
+      const rejected = await fetch(`http://127.0.0.1:${appPort}/_visual/bootstrap`, {
+        headers: { Origin: `http://localhost:${appPort + 2}` },
+      });
+      expect(rejected.status).toBe(403);
       expect((await readInstance(root))?.gatewayUrl).toBe(owner.gatewayUrl);
       await server.restart();
       expect(await responseStatus(`http://127.0.0.1:${appPort}/_visual/client.js`)).toBe(200);

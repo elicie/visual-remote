@@ -62,7 +62,7 @@ async function stop(child: ChildProcess): Promise<void> {
   await terminateChildProcessTree(child, 5_000);
 }
 
-test("Next.js serves Pair, HTTP, and Visual Remote WebSocket on the app port", async ({ page }) => {
+test("Next.js serves token-free HTTP and Visual Remote WebSocket on the app port", async ({ page }) => {
   const outputRoot = resolve(repositoryRoot, "output");
   await mkdir(outputRoot, { recursive: true });
   const fixtureRoot = await mkdtemp(join(outputRoot, "next-single-port-"));
@@ -93,7 +93,7 @@ test("Next.js serves Pair, HTTP, and Visual Remote WebSocket on the app port", a
       "  id: next-single-port",
       "  workspace: .",
       "gateway:",
-      "  host: 0.0.0.0",
+      "  host: 127.0.0.1",
       `  port: ${bridgePort}`,
       "upstream:",
       `  port: ${appPort}`,
@@ -109,7 +109,7 @@ test("Next.js serves Pair, HTTP, and Visual Remote WebSocket on the app port", a
       `  cwd: ${JSON.stringify(fixtureRoot)},`,
       `  appPort: ${appPort},`,
       `  bridgePort: ${bridgePort},`,
-      '  bridgeHost: "0.0.0.0",',
+      '  bridgeHost: "127.0.0.1",',
       "});",
       "",
     ].join("\n"),
@@ -147,21 +147,21 @@ test("Next.js serves Pair, HTTP, and Visual Remote WebSocket on the app port", a
     }, "Next.js readiness");
 
     await waitFor(
-      () => /\[visual-remote\] Pair: \S+/.test(output),
-      "Visual Remote Pair URL",
+      () => /\[visual-remote\] Open: \S+/.test(output),
+      "Visual Remote Open URL",
     );
-    const pairUrl = /\[visual-remote\] Pair: (\S+)/.exec(output)?.[1];
-    expect(pairUrl).toBeDefined();
-    const parsedPairUrl = new URL(pairUrl ?? "http://invalid");
-    expect(parsedPairUrl.origin).toBe(appOrigin);
-    expect(parsedPairUrl.hash).toMatch(/^#visual-pair=[A-Za-z0-9_-]+$/);
+    const openUrl = /\[visual-remote\] Open: (\S+)/.exec(output)?.[1];
+    expect(openUrl).toBeDefined();
+    const parsedOpenUrl = new URL(openUrl ?? "http://invalid");
+    expect(parsedOpenUrl.origin).toBe(appOrigin);
+    expect(parsedOpenUrl.hash).toBe("");
 
     const client = await fetch(`http://127.0.0.1:${appPort}/_visual/client.js`);
     expect(client.status).toBe(200);
     expect(await client.text()).toContain("visual-bridge");
 
-    const token = new URLSearchParams(parsedPairUrl.hash.slice(1)).get("visual-pair");
-    expect(token).not.toBeNull();
+    const bootstrap = await fetch(`http://127.0.0.1:${appPort}/_visual/bootstrap`);
+    expect(await bootstrap.json()).toMatchObject({ authMode: "local" });
     const socket = await openWebSocket(
       `ws://127.0.0.1:${appPort}/_visual/ws`,
       appOrigin,
@@ -170,21 +170,21 @@ test("Next.js serves Pair, HTTP, and Visual Remote WebSocket on the app port", a
     socket.send(
       JSON.stringify({
         id: "next-single-port-auth",
-        type: "auth",
+        type: "session.open",
         browserSessionId: "00000000-0000-4000-8000-000000000001",
-        payload: { token },
+        payload: {},
       }),
     );
     await expect(authenticated).resolves.toMatchObject({
-      type: "auth.ok",
+      type: "session.ready",
       projectId: "next-single-port",
-      payload: { authenticated: true, access: "control" },
+      payload: { access: "control" },
     });
     socket.close();
 
     await page.goto(`http://127.0.0.1:${appPort}`);
     expect(new URL(page.url()).origin).toBe(`http://127.0.0.1:${appPort}`);
-    const browserAuthenticated = await page.evaluate(async (pairingToken) => {
+    const browserAuthenticated = await page.evaluate(async () => {
       const url = new URL("/_visual/ws", window.location.href);
       url.protocol = "ws:";
       const browserSocket = new WebSocket(url);
@@ -192,9 +192,9 @@ test("Next.js serves Pair, HTTP, and Visual Remote WebSocket on the app port", a
         browserSocket.addEventListener("open", () => {
           browserSocket.send(JSON.stringify({
             id: "next-browser-origin-auth",
-            type: "auth",
+            type: "session.open",
             browserSessionId: "00000000-0000-4000-8000-000000000002",
-            payload: { token: pairingToken },
+            payload: {},
           }));
         }, { once: true });
         browserSocket.addEventListener("message", (event) => {
@@ -211,11 +211,11 @@ test("Next.js serves Pair, HTTP, and Visual Remote WebSocket on the app port", a
           reject(new Error("Same-origin browser WebSocket failed"));
         }, { once: true });
       });
-    }, token);
+    });
     expect(browserAuthenticated).toMatchObject({
-      type: "auth.ok",
+      type: "session.ready",
       projectId: "next-single-port",
-      payload: { authenticated: true, access: "control" },
+      payload: { access: "control" },
     });
   } catch (error) {
     throw new Error(

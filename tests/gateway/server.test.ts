@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -111,7 +111,7 @@ describe("Gateway server", () => {
 
   async function startGateway(
     controlService: ControlService,
-    overrides: Pick<GatewayOptions, "viewerToken" | "viewerSessionTtlMs"> = {},
+    overrides: Pick<GatewayOptions, "viewerToken" | "viewerSessionTtlMs" | "authMode" | "allowedOrigins"> = {},
   ): Promise<string> {
     const directory = await mkdtemp(join(tmpdir(), "visual-overlay-"));
     const overlayBundlePath = join(directory, "client.js");
@@ -122,7 +122,6 @@ describe("Gateway server", () => {
       upstream: `http://127.0.0.1:${upstreamPort}`,
       pairingToken: "fixture-token",
       viewerToken: "fixture-viewer-token",
-      ...overrides,
       projectId: "fixture",
       controlService,
       host: "127.0.0.1",
@@ -130,6 +129,7 @@ describe("Gateway server", () => {
       overlayBundlePath,
       viewerBundlePath,
       allowedOrigins: ["https://allowed.example"],
+      ...overrides,
     });
     return (await gateway.start()).url;
   }
@@ -146,6 +146,109 @@ describe("Gateway server", () => {
         port: gatewayPort,
       }),
     ).toThrow("Viewer token must differ");
+  });
+
+  it("serves local resources without tokens and restricts viewer writes", async () => {
+    const createTask = vi.fn(() => ({ id: "new-task" }));
+    const url = await startGateway({
+      health: () => ({ status: "ok" }), project: () => ({ id: "fixture" }), createTask,
+    }, { authMode: "local", allowedOrigins: [`http://localhost:${upstreamPort}`] });
+    expect(await (await fetch(`${url}/_visual/bootstrap`)).json()).toEqual({ authMode: "local", projectId: "fixture" });
+    for (const path of ["client.js", "viewer.js", "viewer", "api/health"]) {
+      expect((await fetch(`${url}/_visual/${path}`)).status).toBe(200);
+    }
+    expect(await (await fetch(`${url}/_visual/api/viewer-session`)).json()).toEqual({ viewerUrl: "/_visual/viewer" });
+    expect((await fetch(`${url}/_visual/api/health`, {
+      headers: { "X-Visual-Mode": "viewer", origin: `http://localhost:${upstreamPort}` },
+    })).status).toBe(200);
+    expect((await fetch(`${url}/_visual/api/tasks`, {
+      method: "POST", headers: { "X-Visual-Mode": "viewer", "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "change" }),
+    })).status).toBe(403);
+    expect((await fetch(`${url}/_visual/api/viewer-session`, { headers: { "X-Visual-Mode": "viewer" } })).status).toBe(403);
+    expect(createTask).not.toHaveBeenCalled();
+    expect((await fetch(`${url}/_visual/api/tasks`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "change" }),
+    })).status).toBe(201);
+    expect(createTask).toHaveBeenCalledOnce();
+  });
+
+  it("rejects foreign local hosts and origins across visual resources, not upstream", async () => {
+    const url = await startGateway({
+      health: () => ({ status: "ok" }), project: () => ({ id: "fixture" }),
+    }, { authMode: "local", allowedOrigins: [] });
+    const rejectedHeaders: Record<string, string>[] = [
+      { host: "foreign.example" }, { host: `localhost:${gatewayPort + 1}` },
+      { origin: "https://foreign.example" }, { origin: "null" },
+      { origin: `http://localhost:${upstreamPort}` }, { "sec-fetch-site": "cross-site" },
+      { host: "foreign.example", "x-forwarded-host": `127.0.0.1:${gatewayPort}`, "x-forwarded-for": "127.0.0.1" },
+    ];
+    for (const path of ["bootstrap", "client.js", "viewer.js", "viewer", "api/health", "unknown"]) {
+      for (const headers of rejectedHeaders) {
+        const status = await new Promise<number | undefined>((resolve, reject) => {
+          const request = httpRequest(`${url}/_visual/${path}`, { headers }, (response) => {
+            response.resume(); resolve(response.statusCode);
+          });
+          request.once("error", reject); request.end();
+        });
+        expect(status).toBe(403);
+      }
+    }
+    expect((await fetch(`${url}/asset.js`, { headers: { origin: "https://foreign.example" } })).status).toBe(200);
+    await expect(openWebSocket(`${url.replace("http:", "ws:")}/_visual/ws`, "https://foreign.example")).rejects.toThrow("403");
+    await expect(new Promise((resolve, reject) => {
+      const socket = new WebSocket(`${url.replace("http:", "ws:")}/_visual/ws`, { headers: { host: "foreign.example" } });
+      socket.once("open", resolve); socket.once("error", reject);
+    })).rejects.toThrow("403");
+  });
+
+  it("opens local control and viewer sockets with session.open", async () => {
+    const connectWebSocket = vi.fn(({ socket }: AuthenticatedControlSocket) => {
+      socket.on("message", (data) => socket.send(data.toString()));
+    });
+    const connectViewerWebSocket = vi.fn();
+    const url = await startGateway({
+      health: () => ({ status: "ok" }), project: () => ({ id: "fixture" }),
+      connectWebSocket, connectViewerWebSocket,
+    }, { authMode: "local", allowedOrigins: [] });
+    for (const mode of ["control", "viewer"] as const) {
+      const socket = await openWebSocket(`${url.replace("http:", "ws:")}/_visual/ws`, url);
+      const ready = nextMessage(socket);
+      socket.send(JSON.stringify({ type: "session.open", payload: { mode } }));
+      expect(await ready).toEqual({ type: "session.ready", projectId: "fixture", payload: { access: mode } });
+      if (mode === "control") {
+        const echo = nextMessage(socket);
+        socket.send(JSON.stringify({ type: "browser.hello" }));
+        expect(await echo).toEqual({ type: "browser.hello" });
+      }
+      socket.close();
+    }
+    expect(connectWebSocket).toHaveBeenCalledOnce();
+    expect(connectViewerWebSocket).toHaveBeenCalledOnce();
+    for (const frame of [
+      { type: "session.open", payload: { mode: "admin" } },
+      { type: "auth", payload: { token: "fixture-token" } },
+    ]) {
+      const invalid = await openWebSocket(`${url.replace("http:", "ws:")}/_visual/ws`);
+      const closed = nextClose(invalid);
+      invalid.send(JSON.stringify(frame));
+      expect((await closed).code).toBe(4401);
+    }
+  });
+
+  it("rejects local configuration with external binds or application origins", () => {
+    const options: GatewayOptions = {
+      upstream: `http://127.0.0.1:${upstreamPort}`, pairingToken: "", projectId: "fixture",
+      controlService: createBasicControlService({ project: { id: "fixture" } }), authMode: "local", port: gatewayPort,
+    };
+    expect(() => createGatewayServer(options)).toThrow("loopback gateway host");
+    for (const host of ["0.0.0.0", "::", "192.168.1.2", "remote.example"]) {
+      expect(() => createGatewayServer({ ...options, host })).toThrow("loopback gateway host");
+    }
+    for (const origin of ["https://foreign.example", "http://127.0.0.2", "file://localhost"]) {
+      expect(() => createGatewayServer({ ...options, host: "127.0.0.1", allowedOrigins: [origin] }))
+        .toThrow("loopback application origins");
+    }
   });
 
   it("injects only GET HTML and requests identity encoding upstream", async () => {

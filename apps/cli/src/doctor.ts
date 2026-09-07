@@ -254,8 +254,8 @@ export async function runDoctor(
       status: publicUrl === undefined ? "warning" : "pass",
       message:
         publicUrl === undefined
-          ? "No gateway.publicUrl is configured; pairing links will use the local gateway URL."
-          : `Pairing links will use ${publicUrl}.`,
+          ? "No gateway.publicUrl is configured; open links will use the local gateway URL."
+          : `Open links will use ${publicUrl}.`,
     });
 
     const allowedOrigins = loaded.config.security.allowedOrigins;

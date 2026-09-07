@@ -61,7 +61,7 @@ describe("visual init", () => {
       requireConfig: true,
       configRoot: root,
     });
-    expect(loaded.config.gateway).toEqual({ host: "0.0.0.0", port: "auto" });
+    expect(loaded.config.gateway).toEqual({ host: "127.0.0.1", port: "auto" });
     expect(loaded.config.upstream.command).toEqual([
       "corepack",
       "pnpm",

@@ -74,7 +74,7 @@ async function waitUntilReady(
   throw new Error(`Browser fixture did not become ready.\n${output()}`);
 }
 
-async function startFixture(): Promise<RunningFixture> {
+async function startFixture(authMode: "local" | "token" = "token"): Promise<RunningFixture> {
   const gatewayPort = await findAvailablePort(10_001, "0.0.0.0");
   const upstreamPort = await findAvailablePort(
     gatewayPort + 1,
@@ -92,6 +92,7 @@ async function startFixture(): Promise<RunningFixture> {
         ...process.env,
         VISUAL_FIXTURE_GATEWAY_PORT: String(gatewayPort),
         VISUAL_FIXTURE_UPSTREAM_PORT: String(upstreamPort),
+        VISUAL_FIXTURE_AUTH_MODE: authMode,
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -578,3 +579,89 @@ for (const outcome of ["success", "error"] as const) {
     });
   }
 }
+
+test("local ordinary URLs ignore stale tokens and connect control and read-only viewer", async ({ context, page, request }) => {
+  const local = await startFixture("local");
+  const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+  const frames: Array<{ type: string; payload?: { mode?: string } }> = [];
+  context.on("request", (entry) => {
+    if (entry.url().includes("/_visual/")) requests.push({ url: entry.url(), headers: entry.headers() });
+  });
+  const observeFrames = (target: Page) => target.on("websocket", (socket) => {
+    socket.on("framesent", ({ payload }) => frames.push(JSON.parse(String(payload))));
+  });
+  observeFrames(page);
+  context.on("page", observeFrames);
+  await context.addInitScript(() => {
+    sessionStorage.setItem("visual-bridge:pairing-token", "stale-control-token");
+    sessionStorage.setItem("visual-bridge:viewer-token", "stale-viewer-token");
+  });
+  try {
+    await page.goto(local.origin);
+    const toolbar = page.getByRole("navigation", { name: "Visual Bridge 도구" });
+    await expect(toolbar).toBeVisible();
+    await expect.poll(() => frames.some((frame) => frame.type === "browser.hello")).toBe(true);
+    await expect(toolbar.getByRole("link", { name: "전체화면 작업 보드를 새 탭에서 열기" })).toHaveAttribute("href", "/_visual/viewer");
+    await page.reload();
+    await expect(toolbar).toBeVisible();
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await page.getByPlaceholder("선택한 화면을 어떻게 바꿀까요?").fill("Local token-free request");
+    await page.getByRole("button", { name: "요청 보내기" }).click();
+    await expect(page.locator("#visual-task-strip .phase-mark")).toHaveAttribute("data-state", "review");
+    const viewer = await context.newPage();
+    await viewer.goto(`${local.origin}/_visual/viewer`);
+    await expect(viewer.getByRole("heading", { name: "프로젝트 작업 흐름" })).toBeVisible();
+    await expect(viewer.locator(".connection-readout")).toHaveAttribute("data-state", "connected");
+    await expect(viewer.locator(".task-ledger")).toContainText("Local token-free request");
+    await expect(viewer.getByRole("alert")).toHaveCount(0);
+    await expect.poll(() => requests.some((entry) => entry.url.includes("/files") && entry.headers["x-visual-mode"] === "viewer")).toBe(true);
+    const denied = await request.post(`${local.origin}/_visual/api/tasks`, {
+      headers: { "X-Visual-Mode": "viewer", Origin: local.origin },
+      data: taskPayload(local.origin, "Viewer must not write"),
+    });
+    expect(denied.status()).toBe(403);
+    expect(frames.filter((frame) => frame.type === "session.open").map((frame) => frame.payload?.mode)).toEqual(expect.arrayContaining(["control", "viewer"]));
+    expect(frames.some((frame) => frame.type === "auth")).toBe(false);
+    expect(requests.some((entry) => entry.headers.authorization)).toBe(false);
+    expect(requests.some((entry) => entry.url.includes("/viewer-session"))).toBe(false);
+    expect(await page.evaluate(() => sessionStorage.getItem("visual-bridge:pairing-token"))).toBe("stale-control-token");
+    expect(await viewer.evaluate(() => sessionStorage.getItem("visual-bridge:viewer-token"))).toBe("stale-viewer-token");
+  } finally {
+    await stopFixture(local);
+  }
+});
+
+for (const path of ["/", "/_visual/viewer"]) {
+  test(`bootstrap failure is visible and never guesses local mode on ${path}`, async ({ page }) => {
+    const sockets: string[] = [];
+    page.on("websocket", (socket) => sockets.push(socket.url()));
+    await page.route("**/_visual/bootstrap", (route) => route.fulfill({ status: 503, body: "Unavailable" }));
+    await page.goto(`${fixture.origin}${path}`);
+    await expect(page.getByRole("alert")).toContainText("Bridge 설정을 불러오지 못했습니다");
+    await expect(page.getByRole("button", { name: "다시 시도" })).toBeVisible();
+    expect(sockets).toEqual([]);
+  });
+}
+
+test("local bootstrap selects session.open before any token handshake", async ({ page }) => {
+  const frames: Array<{ type: string; payload?: { mode?: string } }> = [];
+  await page.route("**/_visual/bootstrap", (route) => route.fulfill({
+    json: { authMode: "local", projectId: "browser-fixture" },
+  }));
+  await page.route("**/_visual/api/tasks", (route) => route.fulfill({ json: [] }));
+  await page.route("**/_visual/api/project", (route) => route.fulfill({ json: { projectId: "browser-fixture" } }));
+  await page.routeWebSocket("**/_visual/ws", (socket) => {
+    socket.onMessage((raw) => {
+      const frame = JSON.parse(String(raw));
+      frames.push(frame);
+      if (frame.type === "session.open") socket.send(JSON.stringify({
+        type: "session.ready", projectId: "browser-fixture", payload: { access: "control" },
+      }));
+    });
+  });
+  await page.goto(fixture.origin);
+  await expect(page.getByRole("navigation", { name: "Visual Bridge 도구" })).toBeVisible();
+  await expect.poll(() => frames.some((frame) => frame.type === "browser.hello")).toBe(true);
+  expect(frames[0]).toEqual({ type: "session.open", payload: { mode: "control" } });
+  expect(frames.some((frame) => frame.type === "auth")).toBe(false);
+});

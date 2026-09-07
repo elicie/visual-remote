@@ -125,6 +125,8 @@ async function startOrReuseBridge(
     const ownedBridge = await startAttachBridge(
       {
         upstream: upstreamUrl(config),
+        fallbackPublicUrl: upstreamUrl(config),
+        fallbackLoopbackOrigins: true,
         ...(options.bridgeHost === undefined
           ? {}
           : { host: options.bridgeHost }),
@@ -149,7 +151,7 @@ async function startOrReuseBridge(
 }
 
 export function visualRemote(options: VisualRemoteViteOptions = {}): Plugin {
-  let pairingUrlAnnounced = false;
+  let openUrlAnnounced = false;
 
   return {
     name: "visual-remote",
@@ -209,12 +211,12 @@ export function visualRemote(options: VisualRemoteViteOptions = {}): Plugin {
         target: bridge.gatewayUrl,
         ws: true,
       };
-      if (!pairingUrlAnnounced) {
-        pairingUrlAnnounced = true;
+      if (!openUrlAnnounced) {
+        openUrlAnnounced = true;
         server.config.logger.info(
           bridge.openUrl === undefined
             ? `[visual-remote] Reusing Bridge: ${bridge.gatewayUrl}`
-            : `[visual-remote] Pair: ${bridge.openUrl}`,
+            : `[visual-remote] ${bridge.ownedBridge?.authMode === "local" ? "Open" : "Pair"}: ${bridge.openUrl}`,
         );
       }
     },

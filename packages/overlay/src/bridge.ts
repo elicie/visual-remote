@@ -68,10 +68,36 @@ export interface TaskEventRoute {
   taskId?: string;
 }
 
+export interface BridgeBootstrap {
+  authMode: "local" | "token";
+  projectId: string;
+}
+
+export interface BridgeRequestOptions {
+  authMode?: BridgeBootstrap["authMode"];
+  mode?: "control" | "viewer";
+}
+
+export async function fetchBootstrap(): Promise<BridgeBootstrap> {
+  const response = await fetch("/_visual/bootstrap", {
+    cache: "no-store",
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`Bridge bootstrap failed (${response.status})`);
+  const value = recordOf(await response.json());
+  if (
+    (value?.authMode !== "local" && value?.authMode !== "token")
+    || typeof value.projectId !== "string"
+    || !value.projectId
+  ) throw new Error("Bridge returned invalid bootstrap settings");
+  return { authMode: value.authMode, projectId: value.projectId };
+}
+
 export interface BridgeConnectionOptions {
   token: string;
   browserSessionId: string;
   mode?: "control" | "viewer";
+  authMode?: BridgeBootstrap["authMode"];
   getPageState?: () => Record<string, unknown>;
   onSnapshot: (snapshot: ConnectionSnapshot) => void;
   onEvent: (event: ServerEvent) => void;
@@ -175,6 +201,7 @@ export class BridgeConnection {
 
   private readonly token: string;
   private readonly mode: "control" | "viewer";
+  private readonly authMode: BridgeBootstrap["authMode"];
   private readonly getPageState: () => Record<string, unknown>;
   private readonly sequenceStorageKey: string;
   private readonly onSnapshot: (snapshot: ConnectionSnapshot) => void;
@@ -194,6 +221,7 @@ export class BridgeConnection {
     this.token = options.token;
     this.browserSessionId = options.browserSessionId;
     this.mode = options.mode ?? "control";
+    this.authMode = options.authMode ?? "token";
     this.getPageState = options.getPageState ?? (() => ({}));
     this.sequenceStorageKey =
       this.mode === "viewer" ? VIEWER_LAST_SEQUENCE_KEY : LAST_SEQUENCE_KEY;
@@ -257,8 +285,14 @@ export class BridgeConnection {
     socket.addEventListener("open", () => {
       this.reconnectAttempt = 0;
 
-      // Pairing is intentionally the first frame on every socket.
-      this.send("auth", { token: this.token });
+      if (this.authMode === "local") {
+        socket.send(JSON.stringify({
+          type: "session.open",
+          payload: { mode: this.mode },
+        }));
+      } else {
+        this.send("auth", { token: this.token });
+      }
     });
 
     socket.addEventListener("message", (message) => {
@@ -291,7 +325,7 @@ export class BridgeConnection {
       return;
     }
 
-    if (parsed.type === "auth.ok") {
+    if (parsed.type === (this.authMode === "local" ? "session.ready" : "auth.ok")) {
       this.projectId =
         typeof parsed.projectId === "string" ? parsed.projectId : this.projectId;
       this.state = "connected";
@@ -367,9 +401,13 @@ async function authorizedFetch(
   token: string,
   path: string,
   init?: RequestInit,
+  options: BridgeRequestOptions = {},
 ): Promise<Response> {
   const headers = new Headers(init?.headers);
-  if (token) {
+  if (options.authMode === "local") {
+    headers.delete("Authorization");
+    if (options.mode === "viewer") headers.set("X-Visual-Mode", "viewer");
+  } else if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
   if (init?.body && !headers.has("Content-Type")) {
@@ -405,9 +443,9 @@ export async function fetchViewerUrl(token: string): Promise<string> {
   return viewerUrl;
 }
 
-export async function fetchProjectId(token: string): Promise<string | undefined> {
+export async function fetchProjectId(token: string, options: BridgeRequestOptions = {}): Promise<string | undefined> {
   const value = await responseValue(
-    await authorizedFetch(token, "/_visual/api/project"),
+    await authorizedFetch(token, "/_visual/api/project", undefined, options),
   );
   const record = recordOf(value);
   const nested = recordOf(record?.project);
@@ -420,7 +458,7 @@ export async function fetchProjectId(token: string): Promise<string | undefined>
         : undefined;
 }
 
-export interface FetchTasksOptions {
+export interface FetchTasksOptions extends BridgeRequestOptions {
   limit?: number;
   cursor?: Pick<TaskRecord, "createdAt" | "id">;
   signal?: AbortSignal;
@@ -443,6 +481,7 @@ export async function fetchTasks(
       token,
       `/_visual/api/tasks${query}`,
       options.signal ? { signal: options.signal } : undefined,
+      options,
     ),
   );
   const record = recordOf(value);
@@ -612,13 +651,14 @@ export async function fetchTaskArtifacts(
   token: string,
   taskId: string,
   signal?: AbortSignal,
+  options: BridgeRequestOptions = {},
 ): Promise<TaskArtifacts> {
   const base = `/_visual/api/tasks/${encodeURIComponent(taskId)}`;
   const requestInit = signal === undefined ? undefined : { signal };
   const [filesResult, diffResult, logsResult] = await Promise.allSettled([
-    authorizedFetch(token, `${base}/files`, requestInit).then(responseValue),
-    authorizedFetch(token, `${base}/diff`, requestInit).then(responseValue),
-    authorizedFetch(token, `${base}/logs`, requestInit).then(responseValue),
+    authorizedFetch(token, `${base}/files`, requestInit, options).then(responseValue),
+    authorizedFetch(token, `${base}/diff`, requestInit, options).then(responseValue),
+    authorizedFetch(token, `${base}/logs`, requestInit, options).then(responseValue),
   ]);
   const aborted = [filesResult, diffResult, logsResult].find(
     (result): result is PromiseRejectedResult =>

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createServer, type Server } from "node:http";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -59,6 +59,48 @@ async function within<T>(promise: Promise<T>, timeoutMs = 2_000): Promise<T> {
 }
 
 describe("attach CLI lifecycle", () => {
+  it.each([
+    { name: "default", host: undefined, publicUrl: undefined, allowedOrigins: [], mode: "local" },
+    { name: "localhost bind", host: "localhost", publicUrl: undefined, allowedOrigins: [], mode: "local" },
+    { name: "wildcard bind", host: "0.0.0.0", publicUrl: undefined, allowedOrigins: [], mode: "token" },
+    { name: "explicit loopback public URL", host: undefined, publicUrl: "http://localhost:5173", allowedOrigins: [], mode: "token" },
+    { name: "external configured origin", host: undefined, publicUrl: undefined, allowedOrigins: ["https://remote.example.test"], mode: "token" },
+    { name: "loopback configured origin", host: undefined, publicUrl: undefined, allowedOrigins: ["http://localhost:5173"], mode: "local" },
+  ])("selects $mode authentication for $name", async ({ host, publicUrl, allowedOrigins, mode }) => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "visual-cli-auth-"));
+    const runtimeDirectory = await mkdtemp(join(tmpdir(), "visual-cli-auth-runtime-"));
+    await execFileAsync("git", ["init", "--quiet", repoRoot]);
+    await mkdir(join(repoRoot, ".visualdev"));
+    await writeFile(join(repoRoot, ".visualdev/config.yaml"), JSON.stringify({
+      version: 1,
+      project: { id: "auth-fixture", workspace: "." },
+      security: { allowedOrigins },
+    }));
+    const bridge = await startAttachBridge({
+      upstream: "http://127.0.0.1:5173",
+      ...(host === undefined ? {} : { host }),
+      ...(publicUrl === undefined ? {} : { publicUrl }),
+    }, {
+      cwd: repoRoot,
+      environment: { ...process.env, XDG_RUNTIME_DIR: runtimeDirectory },
+      upstreamMonitor: false,
+      controlServiceFactory: () => createBasicControlService({ project: { id: "auth-fixture" } }),
+    });
+    try {
+      expect(bridge.authMode).toBe(mode);
+      const bootstrap = await fetch(`${bridge.gatewayUrl}/_visual/bootstrap`);
+      expect(await bootstrap.json()).toMatchObject({ authMode: mode });
+      if (mode === "local") {
+        expect(bridge.openUrl).toBe(bridge.gatewayUrl);
+        expect(new URL(bridge.openUrl).hash).toBe("");
+      } else {
+        expect(new URL(bridge.openUrl).hash).toMatch(/^#visual-pair=[A-Za-z0-9_-]+$/);
+      }
+    } finally {
+      await bridge.close();
+    }
+  });
+
   it("starts with service-safe defaults, registers status, and cleans up", async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "visual-cli-repo-"));
     const runtimeDirectory = await mkdtemp(join(tmpdir(), "visual-cli-runtime-"));
@@ -99,8 +141,9 @@ describe("attach CLI lifecycle", () => {
 
     try {
       expect(Number(new URL(bridge.gatewayUrl).port)).toBeGreaterThanOrEqual(10_001);
-      expect(new URL(bridge.gatewayUrl).hostname).toBe("localhost");
-      expect(bridge.gateway.address()?.host).toBe("0.0.0.0");
+      expect(new URL(bridge.gatewayUrl).hostname).toBe("127.0.0.1");
+      expect(bridge.gateway.address()?.host).toBe("127.0.0.1");
+      expect(bridge.authMode).toBe("token");
       const openUrl = new URL(bridge.openUrl);
       expect(openUrl.origin).toBe("https://portr.example.test");
       expect(openUrl.hash).toMatch(/^#visual-pair=[A-Za-z0-9_-]+$/);

@@ -114,9 +114,10 @@ const controlService = createTaskControlService({
 const gateway = createGatewayServer({
   upstream: `http://127.0.0.1:${upstreamPort}`,
   pairingToken,
+  authMode: process.env.VISUAL_FIXTURE_AUTH_MODE === "local" ? "local" : "token",
   projectId,
   controlService,
-  host: "0.0.0.0",
+  host: process.env.VISUAL_FIXTURE_AUTH_MODE === "local" ? "127.0.0.1" : "0.0.0.0",
   port: gatewayPort,
 });
 await gateway.start();

@@ -14,11 +14,14 @@ import {
   BridgeConnection,
   changedFilesFromEvent,
   consumeViewerToken,
+  fetchBootstrap,
   fetchProjectId,
   fetchTaskArtifacts,
   fetchTasks,
   logFromEvent,
   taskFromEvent,
+  type BridgeBootstrap,
+  type BridgeRequestOptions,
   type ConnectionSnapshot,
   type ConnectionState,
   type TaskArtifacts,
@@ -194,8 +197,11 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
-function Viewer() {
-  const token = useMemo(consumeViewerToken, []);
+function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
+  const { authMode } = bootstrap;
+  const token = useMemo(() => authMode === "token" ? consumeViewerToken() ?? "" : "", [authMode]);
+  const canConnect = authMode === "local" || Boolean(token);
+  const requestOptions = useMemo<BridgeRequestOptions>(() => ({ authMode, mode: "viewer" }), [authMode]);
   const viewerSessionId = useMemo(() => crypto.randomUUID(), []);
   const selectedIdRef = useRef<string | null>(null);
   const tasksRef = useRef<TaskRecord[]>([]);
@@ -205,21 +211,21 @@ function Viewer() {
   const dashboardRequestRef = useRef(0);
   const hydratedRef = useRef(false);
   const pendingEventsRef = useRef<ServerEvent[]>([]);
-  const connectionStateRef = useRef<ConnectionState>(token ? "connecting" : "unpaired");
-  const [projectId, setProjectId] = useState("current");
+  const connectionStateRef = useRef<ConnectionState>(canConnect ? "connecting" : "unpaired");
+  const [projectId, setProjectId] = useState(bootstrap.projectId);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [query, setQuery] = useState("");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailState | null>(null);
-  const [loading, setLoading] = useState(Boolean(token));
+  const [loading, setLoading] = useState(canConnect);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
   const [expandedDiffTaskId, setExpandedDiffTaskId] = useState<string | null>(null);
   const [connection, setConnection] = useState<ConnectionSnapshot>({
-    state: token ? "connecting" : "unpaired",
+    state: canConnect ? "connecting" : "unpaired",
     lastSequence: 0,
   });
 
@@ -234,7 +240,7 @@ function Viewer() {
       setSelectedTaskId(taskId);
       detailAbortRef.current?.abort();
       detailAbortRef.current = null;
-      if (!task || !token) {
+      if (!task || !canConnect) {
         setDetail(null);
         return;
       }
@@ -258,7 +264,7 @@ function Viewer() {
             },
       );
       try {
-        const artifacts = await fetchTaskArtifacts(token, task.id, controller.signal);
+        const artifacts = await fetchTaskArtifacts(token, task.id, controller.signal, requestOptions);
         setDetail((current) =>
           current?.taskId === task.id && !controller.signal.aborted
             ? { taskId: task.id, loading: false, ...artifacts }
@@ -282,7 +288,7 @@ function Viewer() {
         if (detailAbortRef.current === controller) detailAbortRef.current = null;
       }
     },
-    [token],
+    [canConnect, requestOptions, token],
   );
 
   const applyServerEvent = useCallback(
@@ -345,7 +351,7 @@ function Viewer() {
   );
 
   const loadDashboard = useCallback(async () => {
-    if (!token) {
+    if (!canConnect) {
       setLoadError("Overlay의 ‘작업 보드’ 버튼에서 다시 열어주세요.");
       return;
     }
@@ -356,8 +362,8 @@ function Viewer() {
     setLoadError(null);
     try {
       const [fetchedTasks, nextProjectId] = await Promise.all([
-        fetchTasks(token, { limit: TASK_FETCH_SIZE }),
-        fetchProjectId(token),
+        fetchTasks(token, { ...requestOptions, limit: TASK_FETCH_SIZE }),
+        fetchProjectId(token, requestOptions),
       ]);
       if (requestId !== dashboardRequestRef.current) return;
       const nextTasks = fetchedTasks.slice(0, TASK_PAGE_SIZE);
@@ -398,16 +404,17 @@ function Viewer() {
         setLoading(false);
       }
     }
-  }, [applyServerEvent, selectTask, token]);
+  }, [applyServerEvent, canConnect, requestOptions, selectTask, token]);
 
   const loadMoreTasks = useCallback(async () => {
-    if (!token || loadingMore) return;
+    if (!canConnect || loadingMore) return;
     const cursor = tasksRef.current.at(-1);
     if (!cursor) return;
     setLoadingMore(true);
     setLoadError(null);
     try {
       const fetchedPage = await fetchTasks(token, {
+        ...requestOptions,
         limit: TASK_FETCH_SIZE,
         cursor: { id: cursor.id, createdAt: cursor.createdAt },
       });
@@ -429,7 +436,7 @@ function Viewer() {
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, token]);
+  }, [canConnect, loadingMore, requestOptions, token]);
 
   useEffect(() => {
     void loadDashboard();
@@ -450,9 +457,10 @@ function Viewer() {
   }, [filteredTasks, selectTask]);
 
   useEffect(() => {
-    if (!token) return;
+    if (!canConnect) return;
     const bridge = new BridgeConnection({
       token,
+      authMode,
       mode: "viewer",
       browserSessionId: viewerSessionId,
       onSequenceGap: () => {
@@ -478,7 +486,7 @@ function Viewer() {
     });
     bridge.connect();
     return () => bridge.close();
-  }, [handleServerEvent, loadDashboard, token, viewerSessionId]);
+  }, [authMode, canConnect, handleServerEvent, loadDashboard, token, viewerSessionId]);
 
   useEffect(
     () => () => {
@@ -842,5 +850,17 @@ document.head.append(style);
 const root = document.getElementById("visual-viewer-root");
 if (root) {
   root.replaceChildren();
-  render(<Viewer />, root);
+  void fetchBootstrap().then((bootstrap) => {
+    render(<Viewer bootstrap={bootstrap} />, root);
+  }).catch(() => {
+    render(
+      <main class="viewer-main">
+        <div class="viewer-error" role="alert">
+          <span>Bridge 설정을 불러오지 못했습니다. Bridge 실행과 연결을 확인한 뒤 다시 시도하세요.</span>
+          <button type="button" onClick={() => location.reload()}>다시 시도</button>
+        </div>
+      </main>,
+      root,
+    );
+  });
 }

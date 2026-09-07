@@ -80,7 +80,7 @@ describe("visual dev config", () => {
 
     expect(loaded.config.project.id).toBe(root.split("/").at(-1));
     expect(loaded.config.gateway).toEqual({
-      host: "0.0.0.0",
+      host: "127.0.0.1",
       port: 10_001,
     });
     expect(loaded.config.upstream.port).toBe("auto");

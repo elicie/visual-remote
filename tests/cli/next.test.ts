@@ -23,7 +23,8 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-async function authenticateOrigin(gatewayUrl: string, origin: string, token: string): Promise<void> {
+async function authenticateOrigin(gatewayUrl: string, origin: string, token: string | null): Promise<void> {
+  const bootstrap = await fetch(`${gatewayUrl}/_visual/bootstrap`).then(async (response) => await response.json()) as { authMode: "local" | "token" };
   const socket = new WebSocket(`${gatewayUrl.replace(/^http/, "ws")}/_visual/ws`, { origin });
   try {
     await new Promise<void>((resolveOpen, reject) => {
@@ -39,16 +40,17 @@ async function authenticateOrigin(gatewayUrl: string, origin: string, token: str
         }
       });
       socket.once("error", reject);
+      socket.once("close", (code) => reject(new Error(`Authentication closed with code ${code}`)));
     });
     socket.send(JSON.stringify({
       id: "next-origin-auth",
-      type: "auth",
+      type: bootstrap.authMode === "local" ? "session.open" : "auth",
       browserSessionId: "00000000-0000-4000-8000-000000000001",
-      payload: { token },
+      payload: bootstrap.authMode === "local" ? {} : { token },
     }));
     await expect(authenticated).resolves.toMatchObject({
-      type: "auth.ok",
-      payload: { authenticated: true, access: "control" },
+      type: bootstrap.authMode === "local" ? "session.ready" : "auth.ok",
+      payload: bootstrap.authMode === "local" ? { access: "control" } : { authenticated: true, access: "control" },
     });
   } finally {
     socket.terminate();
@@ -188,7 +190,13 @@ describe("Visual Remote Next.js integration", () => {
       ...(publicUrl === undefined ? {} : { publicUrl }),
     }, { cwd: root, upstreamMonitor: false });
     try {
-      const token = new URLSearchParams(new URL(bridge.openUrl).hash.slice(1)).get("visual-pair")!;
+      const token = new URLSearchParams(new URL(bridge.openUrl).hash.slice(1)).get("visual-pair");
+      expect(bridge.authMode).toBe(policy === "default" ? "local" : "token");
+      if (policy === "default") expect(new URL(bridge.openUrl).hash).toBe("");
+      else expect(token).toBeTruthy();
+      if (bridge.authMode === "token") {
+        await expect(authenticateOrigin(bridge.gatewayUrl, new URL(bridge.openUrl).origin, "incorrect-token")).rejects.toThrow();
+      }
       const accepted = [new URL(bridge.openUrl).origin];
       if (both) accepted.push(`http://127.0.0.1:${appPort}`);
       if (policy === "explicit allowed origins") accepted.push("https://trusted.example.test");

@@ -135,7 +135,7 @@ export function createDefaultConfig(projectId: string): VisualDevConfig {
       workspace: ".",
     },
     gateway: {
-      host: "0.0.0.0",
+      host: "127.0.0.1",
       port: 10_001,
     },
     upstream: {

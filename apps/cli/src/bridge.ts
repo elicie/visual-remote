@@ -66,6 +66,7 @@ export interface StartManagedBridgeOptions {
 
 export interface RunningBridge {
   mode: BridgeMode;
+  authMode: "local" | "token";
   projectId: string;
   repoRoot: string;
   workspaceRoot: string;
@@ -278,6 +279,17 @@ async function startBridgeCore(
       options.lock ??
       (await acquireWorktreeLock(loadedConfig.repoRoot, { environment }));
     const host = options.host ?? loadedConfig.config.gateway.host;
+    const authMode =
+      ["127.0.0.1", "localhost", "::1"].includes(host)
+      && options.publicUrl === undefined
+      && loadedConfig.config.gateway.publicUrl === undefined
+      && loadedConfig.config.security.allowedOrigins.every((origin) => {
+        const url = new URL(origin);
+        return (url.protocol === "http:" || url.protocol === "https:")
+          && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+      })
+        ? "local"
+        : "token";
     const configuredPublicUrl =
       options.publicUrl
       ?? loadedConfig.config.gateway.publicUrl
@@ -287,7 +299,7 @@ async function startBridgeCore(
         ? undefined
         : normalizePublicUrl(configuredPublicUrl);
     const gatewayPort = await findAvailablePort(startPort(loadedConfig, options.listen), host);
-    const token = generatePairingToken();
+    const token = authMode === "token" ? generatePairingToken() : "";
     const controlContext: BridgeControlContext = {
       mode: options.mode,
       projectId: loadedConfig.config.project.id,
@@ -302,21 +314,28 @@ async function startBridgeCore(
     controlService = await resolveControlService(dependencies, controlContext);
     const allowedOrigins = new Set(loadedConfig.config.security.allowedOrigins);
     if (publicUrl !== undefined) allowedOrigins.add(new URL(publicUrl).origin);
-    if (
-      options.fallbackLoopbackOrigins === true
-      && options.publicUrl === undefined
-      && loadedConfig.config.gateway.publicUrl === undefined
-      && loadedConfig.config.security.allowedOrigins.length === 0
-      && publicUrl !== undefined
-    ) {
-      const loopbackUrl = new URL(publicUrl);
-      if (loopbackUrl.hostname === "localhost" || loopbackUrl.hostname === "127.0.0.1") {
-        loopbackUrl.hostname = loopbackUrl.hostname === "localhost" ? "127.0.0.1" : "localhost";
-        allowedOrigins.add(loopbackUrl.origin);
+    if (loadedConfig.config.security.allowedOrigins.length === 0) {
+      const trustedAppUrl = authMode === "local"
+        ? options.upstreamUrl
+        : options.fallbackLoopbackOrigins === true
+          && options.publicUrl === undefined
+          && loadedConfig.config.gateway.publicUrl === undefined
+          ? publicUrl
+          : undefined;
+      if (trustedAppUrl !== undefined) {
+        const loopbackUrl = new URL(trustedAppUrl);
+        if (["localhost", "127.0.0.1", "[::1]"].includes(loopbackUrl.hostname)) {
+          allowedOrigins.add(loopbackUrl.origin);
+          if (loopbackUrl.hostname !== "[::1]") {
+            loopbackUrl.hostname = loopbackUrl.hostname === "localhost" ? "127.0.0.1" : "localhost";
+            allowedOrigins.add(loopbackUrl.origin);
+          }
+        }
       }
     }
     gateway = createGatewayServer({
       upstream: options.upstreamUrl,
+      authMode,
       pairingToken: token,
       projectId: loadedConfig.config.project.id,
       controlService,
@@ -325,7 +344,9 @@ async function startBridgeCore(
       allowedOrigins: [...allowedOrigins],
     });
     const address = await gateway.start();
-    const openUrl = createPairingUrl(publicUrl ?? address.url, token);
+    const openUrl = authMode === "local"
+      ? publicUrl ?? address.url
+      : createPairingUrl(publicUrl ?? address.url, token);
     const instance: BridgeInstanceRecord = {
       projectId: loadedConfig.config.project.id,
       repoRoot: loadedConfig.repoRoot,
@@ -359,6 +380,7 @@ async function startBridgeCore(
     let closePromise: Promise<void> | undefined;
     return {
       mode: options.mode,
+      authMode,
       projectId: loadedConfig.config.project.id,
       repoRoot: loadedConfig.repoRoot,
       workspaceRoot: loadedConfig.workspaceRoot,

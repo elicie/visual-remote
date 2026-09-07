@@ -29,6 +29,7 @@ import {
   changedFilesFromEvent,
   consumePairingToken,
   createTaskPayload,
+  fetchBootstrap,
   fetchLatestTaskForSession,
   fetchProjectId,
   fetchTaskArtifacts,
@@ -39,6 +40,7 @@ import {
   postTaskAction,
   routeTaskEvent,
   taskFromEvent,
+  type BridgeBootstrap,
   type ConnectionSnapshot,
   type ConnectionState,
 } from "./bridge.js";
@@ -696,12 +698,13 @@ function TaskCompactStrip({
   );
 }
 
-function Overlay({ host }: { host: HTMLElement }) {
+function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBootstrap }) {
+  const { authMode } = bootstrap;
   const pairedFromFragment = useMemo(
-    () => parsePairingFragment(location.hash).token !== null,
-    [],
+    () => authMode === "token" && parsePairingFragment(location.hash).token !== null,
+    [authMode],
   );
-  const token = useMemo(consumePairingToken, []);
+  const token = useMemo(() => authMode === "token" ? consumePairingToken() : "", [authMode]);
   const browserSessionId = useMemo(getBrowserSessionId, []);
   const connectionRef = useRef<BridgeConnection | null>(null);
   const selectedRef = useRef<SelectionItem[]>([]);
@@ -717,7 +720,7 @@ function Overlay({ host }: { host: HTMLElement }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLElement>(null);
 
-  const [open, setOpen] = useState(pairedFromFragment);
+  const [open, setOpen] = useState(authMode === "local" || pairedFromFragment);
   const [mode, setMode] = useState<SelectionMode>("element");
   const [selected, setSelected] = useState<SelectionItem[]>([]);
   const [hovered, setHovered] = useState<HTMLElement | null>(null);
@@ -731,8 +734,8 @@ function Overlay({ host }: { host: HTMLElement }) {
     state: "connecting",
     lastSequence: 0,
   });
-  const [projectId, setProjectId] = useState("current");
-  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState(bootstrap.projectId);
+  const [viewerUrl, setViewerUrl] = useState<string | null>(authMode === "local" ? "/_visual/viewer" : null);
   const [viewerUrlFailed, setViewerUrlFailed] = useState(false);
   const [task, setTask] = useState<TaskView | null>(null);
   const [taskPanelHidden, setTaskPanelHidden] = useState(false);
@@ -936,6 +939,7 @@ function Overlay({ host }: { host: HTMLElement }) {
     }, TASK_HYDRATION_TIMEOUT_MS);
     const bridge = new BridgeConnection({
       token,
+      authMode,
       browserSessionId,
       getPageState: pageState,
       onSnapshot: (snapshot) => {
@@ -1004,9 +1008,10 @@ function Overlay({ host }: { host: HTMLElement }) {
       bridge.close();
       connectionRef.current = null;
     };
-  }, [browserSessionId, handleServerEvent, loadArtifacts, pageState, token]);
+  }, [authMode, browserSessionId, handleServerEvent, loadArtifacts, pageState, token]);
 
   useEffect(() => {
+    if (authMode === "local") return;
     let active = true;
     setViewerUrlFailed(false);
     void fetchViewerUrl(token)
@@ -1022,7 +1027,7 @@ function Overlay({ host }: { host: HTMLElement }) {
     return () => {
       active = false;
     };
-  }, [token]);
+  }, [authMode, token]);
 
   useEffect(() => {
     host.dataset.active = open ? "true" : "false";
@@ -1924,7 +1929,20 @@ function mountOverlay(): void {
   mountPoint.dataset.visualBridgeIgnore = "true";
   shadow.append(style, mountPoint);
   document.body.append(host);
-  render(<Overlay host={host} />, mountPoint);
+  void fetchBootstrap().then((bootstrap) => {
+    render(<Overlay host={host} bootstrap={bootstrap} />, mountPoint);
+  }).catch(() => {
+    host.dataset.active = "true";
+    render(
+      <div class="visual-shell" data-open="true">
+        <div class="toolbar" role="alert">
+          <span>Bridge 설정을 불러오지 못했습니다. Bridge 실행과 연결을 확인한 뒤 다시 시도하세요.</span>
+          <button type="button" onClick={() => location.reload()}>다시 시도</button>
+        </div>
+      </div>,
+      mountPoint,
+    );
+  });
 }
 
 if (document.readyState === "loading") {

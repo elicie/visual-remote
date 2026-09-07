@@ -64,6 +64,7 @@ type AccessLevel = "control" | "viewer";
 
 export interface GatewayOptions {
   upstream: string | URL;
+  authMode?: "local" | "token";
   pairingToken: string;
   viewerToken?: string;
   viewerSessionTtlMs?: number;
@@ -145,6 +146,22 @@ function originAllowed(request: IncomingMessage, allowedOrigins: ReadonlySet<str
   }
   try {
     return allowedOrigins.has(new URL(origin).origin);
+  } catch {
+    return false;
+  }
+}
+
+function localRequestAllowed(request: IncomingMessage, origins: ReadonlySet<string>, authorities: ReadonlySet<string>): boolean {
+  const peer = request.socket.remoteAddress?.replace(/^::ffff:/i, "");
+  if (peer !== "127.0.0.1" && peer !== "::1") return false;
+  if (headerValue(request.headers, "sec-fetch-site") === "cross-site") return false;
+  const host = headerValue(request.headers, "host");
+  if (host === undefined) return false;
+  try {
+    const authority = new URL(`http://${host}`);
+    if (authority.host !== host || !authorities.has(authority.host)) return false;
+    const origin = headerValue(request.headers, "origin");
+    return origin === undefined || origins.has(origin);
   } catch {
     return false;
   }
@@ -491,6 +508,21 @@ function parseWebSocketAuth(data: RawData): string | undefined {
   }
 }
 
+function parseLocalSession(data: RawData): AccessLevel | undefined {
+  try {
+    const message = JSON.parse(data.toString()) as unknown;
+    if (typeof message !== "object" || message === null) return undefined;
+    const candidate = message as Record<string, unknown>;
+    if (candidate.type !== "session.open") return undefined;
+    if (candidate.payload === undefined) return "control";
+    if (typeof candidate.payload !== "object" || candidate.payload === null) return undefined;
+    const mode = (candidate.payload as Record<string, unknown>).mode;
+    return mode === undefined ? "control" : mode === "control" || mode === "viewer" ? mode : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function rejectUpgrade(socket: NodeJS.WritableStream, statusCode: number, reason: string): void {
   socket.write(
     `HTTP/1.1 ${statusCode} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
@@ -507,6 +539,10 @@ function gatewayDisplayHost(host: string): string {
 
 export function createGatewayServer(options: GatewayOptions): GatewayServer {
   const host = options.host ?? "0.0.0.0";
+  const authMode = options.authMode ?? "token";
+  if (authMode === "local" && host !== "127.0.0.1" && host !== "::1" && host !== "localhost") {
+    throw new TypeError("Local authentication requires a loopback gateway host");
+  }
   const port = options.port ?? MIN_SERVICE_PORT;
   assertServicePort(port);
   const upstream = new URL(options.upstream);
@@ -514,9 +550,24 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
     throw new TypeError("Gateway upstream must use http: or https:");
   }
 
-  const allowedOrigins = new Set(
-    (options.allowedOrigins ?? []).map((origin) => new URL(origin).origin),
-  );
+  const allowedOrigins = new Set<string>();
+  const localAuthorities = new Set<string>();
+  for (const origin of options.allowedOrigins ?? []) {
+    const url = new URL(origin);
+    if (authMode === "local" && (
+      !["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)
+      || (url.protocol !== "http:" && url.protocol !== "https:")
+    )) {
+      throw new TypeError("Local authentication only accepts loopback application origins");
+    }
+    allowedOrigins.add(url.origin);
+    if (authMode === "local") localAuthorities.add(url.host);
+  }
+  if (authMode === "local") {
+    const gatewayOrigin = new URL(`http://${gatewayDisplayHost(host)}:${port}`);
+    allowedOrigins.add(gatewayOrigin.origin);
+    localAuthorities.add(gatewayOrigin.host);
+  }
   const overlayBundlePath = options.overlayBundlePath ?? DEFAULT_OVERLAY_BUNDLE_PATH;
   const viewerBundlePath = options.viewerBundlePath ?? DEFAULT_VIEWER_BUNDLE_PATH;
   const viewerSessionTtlMs =
@@ -610,6 +661,19 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
   const server = createServer((request, response) => {
     void (async () => {
       const path = requestPath(request);
+      if (authMode === "local" && (path === "/_visual" || path.startsWith("/_visual/"))
+        && !localRequestAllowed(request, allowedOrigins, localAuthorities)) {
+        writeApiError(response, 403, "origin_forbidden", "Local access requires a trusted loopback host and origin");
+        return;
+      }
+      if (path === "/_visual/bootstrap") {
+        if (request.method !== "GET") {
+          writeApiError(response, 405, "method_not_allowed", "Only GET is supported");
+          return;
+        }
+        writeJson(response, 200, { authMode, projectId: options.projectId });
+        return;
+      }
       if (path === "/_visual/client.js") {
         await serveBrowserBundle(
           request,
@@ -638,11 +702,13 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
       }
 
       if (path.startsWith("/_visual/api/")) {
-        if (!originAllowed(request, allowedOrigins)) {
+        if (authMode === "token" && !originAllowed(request, allowedOrigins)) {
           writeApiError(response, 403, "origin_forbidden", "Request origin is not allowed");
           return;
         }
-        const access = requestAccess(request, options.pairingToken, viewerSessions);
+        const access = authMode === "local"
+          ? headerValue(request.headers, "x-visual-mode") === "viewer" ? "viewer" : "control"
+          : requestAccess(request, options.pairingToken, viewerSessions);
         if (access === undefined) {
           response.setHeader("www-authenticate", "Bearer");
           writeApiError(
@@ -667,6 +733,10 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
                 "control_token_required",
                 "Viewer sessions cannot open another viewer session",
               );
+              return;
+            }
+            if (authMode === "local") {
+              writeJson(response, 200, { viewerUrl: "/_visual/viewer" });
               return;
             }
             const viewerToken = issueViewerSessionToken();
@@ -755,6 +825,11 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
 
   server.on("upgrade", (request, socket, head) => {
     const path = requestPath(request);
+    if (authMode === "local" && (path === "/_visual" || path.startsWith("/_visual/"))
+      && !localRequestAllowed(request, allowedOrigins, localAuthorities)) {
+      rejectUpgrade(socket, 403, "Forbidden");
+      return;
+    }
     if (path !== "/_visual/ws") {
       proxy.ws(request, socket, head, { target: upstream, selfHandleResponse: false }, () => {
         socket.destroy();
@@ -762,7 +837,7 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
       return;
     }
 
-    if (!originAllowed(request, allowedOrigins)) {
+    if (authMode === "token" && !originAllowed(request, allowedOrigins)) {
       rejectUpgrade(socket, 403, "Forbidden");
       return;
     }
@@ -784,13 +859,9 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
       });
 
       webSocket.once("message", (data) => {
-        const token = parseWebSocketAuth(data);
-        const access = tokenAccess(
-          token,
-          options.pairingToken,
-          viewerSessions,
-          Date.now(),
-        );
+        const access = authMode === "local"
+          ? parseLocalSession(data)
+          : tokenAccess(parseWebSocketAuth(data), options.pairingToken, viewerSessions, Date.now());
         if (access === undefined) {
           clearTimeout(timeout);
           webSocket.close(4401, "Invalid viewer token");
@@ -800,9 +871,9 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
         clearTimeout(timeout);
         webSocket.send(
           JSON.stringify({
-            type: "auth.ok",
+            type: authMode === "local" ? "session.ready" : "auth.ok",
             projectId: options.projectId,
-            payload: { authenticated: true, access },
+            payload: authMode === "local" ? { access } : { authenticated: true, access },
           }),
         );
         const connect =
