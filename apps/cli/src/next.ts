@@ -177,6 +177,7 @@ async function startOrReuseBridge(
       {
         upstream: resolveNextUpstream(options),
         fallbackPublicUrl: resolveNextPublicUrl(options),
+        fallbackLoopbackOrigins: true,
         ...(options.bridgeHost === undefined ? {} : { host: options.bridgeHost }),
         ...(options.bridgePort === undefined ? {} : { listen: options.bridgePort }),
       },

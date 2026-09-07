@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { WebSocket } from "ws";
 import {
   closeVisualRemoteNext,
   isNextDetachedTelemetryProcess,
@@ -21,6 +22,38 @@ import {
 } from "@visual-remote/bridge-core";
 
 const execFileAsync = promisify(execFile);
+
+async function authenticateOrigin(gatewayUrl: string, origin: string, token: string): Promise<void> {
+  const socket = new WebSocket(`${gatewayUrl.replace(/^http/, "ws")}/_visual/ws`, { origin });
+  try {
+    await new Promise<void>((resolveOpen, reject) => {
+      socket.once("open", resolveOpen);
+      socket.once("error", reject);
+    });
+    const authenticated = new Promise<unknown>((resolveMessage, reject) => {
+      socket.once("message", (data) => {
+        try {
+          resolveMessage(JSON.parse(data.toString()) as unknown);
+        } catch (error) {
+          reject(error);
+        }
+      });
+      socket.once("error", reject);
+    });
+    socket.send(JSON.stringify({
+      id: "next-origin-auth",
+      type: "auth",
+      browserSessionId: "00000000-0000-4000-8000-000000000001",
+      payload: { token },
+    }));
+    await expect(authenticated).resolves.toMatchObject({
+      type: "auth.ok",
+      payload: { authenticated: true, access: "control" },
+    });
+  } finally {
+    socket.terminate();
+  }
+}
 
 describe("Visual Remote Next.js integration", () => {
   it("resolves the original Next.js port from options, argv, and environment", () => {
@@ -124,8 +157,52 @@ describe("Visual Remote Next.js integration", () => {
       const client = await fetch(`http://127.0.0.1:${bridgePort}/_visual/client.js`);
       expect(client.status).toBe(200);
       expect(await client.text()).toContain("__visual");
+      const localApi = await fetch(`http://127.0.0.1:${bridgePort}/_visual/api/unknown`, {
+        headers: { Origin: `http://127.0.0.1:${appPort}` },
+      });
+      expect(localApi.status).not.toBe(403);
     } finally {
       await closeVisualRemoteNext(root);
+    }
+  });
+
+  it.each([
+    { policy: "default", config: "", publicUrl: undefined, both: true },
+    { policy: "configured public URL", config: "  publicUrl: https://next.example.test\n", publicUrl: undefined, both: false },
+    { policy: "explicit public URL", config: "", publicUrl: "https://next.example.test", both: false },
+    { policy: "explicit allowed origins", config: "", publicUrl: undefined, both: false },
+  ])("authenticates only intended origins with $policy", async ({ policy, config, publicUrl, both }) => {
+    const root = await mkdtemp(join(tmpdir(), "visual-next-origin-"));
+    await execFileAsync("git", ["init", "--quiet", root]);
+    await mkdir(join(root, ".visualdev"));
+    await writeFile(
+      join(root, ".visualdev/config.yaml"),
+      `version: 1\nproject:\n  id: next-origin-fixture\n  workspace: .\ngateway:\n  host: 127.0.0.1\n  port: auto\n${config}upstream:\n  port: auto\n${policy === "explicit allowed origins" ? "security:\n  allowedOrigins:\n    - https://trusted.example.test\n" : ""}`,
+    );
+    const appPort = await findAvailablePort(34_000 + (process.pid % 1_000), "127.0.0.1");
+    const bridge = await startAttachBridge({
+      upstream: `http://127.0.0.1:${appPort}`,
+      listen: appPort + 1,
+      fallbackPublicUrl: `http://localhost:${appPort}`,
+      fallbackLoopbackOrigins: true,
+      ...(publicUrl === undefined ? {} : { publicUrl }),
+    }, { cwd: root, upstreamMonitor: false });
+    try {
+      const token = new URLSearchParams(new URL(bridge.openUrl).hash.slice(1)).get("visual-pair")!;
+      const accepted = [new URL(bridge.openUrl).origin];
+      if (both) accepted.push(`http://127.0.0.1:${appPort}`);
+      if (policy === "explicit allowed origins") accepted.push("https://trusted.example.test");
+      for (const origin of accepted) {
+        await authenticateOrigin(bridge.gatewayUrl, origin, token);
+      }
+      const rejected = ["https://unrelated.example.test", `http://127.0.0.1:${appPort + 2}`, `http://192.168.1.10:${appPort}`];
+      if (!both) rejected.push(`http://127.0.0.1:${appPort}`);
+      if (config || publicUrl) rejected.push(`http://localhost:${appPort}`);
+      for (const origin of rejected) {
+        await expect(authenticateOrigin(bridge.gatewayUrl, origin, token)).rejects.toThrow("Unexpected server response: 403");
+      }
+    } finally {
+      await bridge.close();
     }
   });
 
@@ -151,6 +228,7 @@ describe("Visual Remote Next.js integration", () => {
         upstream: `http://127.0.0.1:${appPort}`,
         host: "127.0.0.1",
         listen: ownerPort,
+        publicUrl: "https://owner.example.test",
       },
       { cwd: root, upstreamMonitor: false },
     );
@@ -181,6 +259,11 @@ describe("Visual Remote Next.js integration", () => {
         `${owner.gatewayUrl}/_visual/:path*`,
       );
       expect((await readInstance(root))?.gatewayUrl).toBe(owner.gatewayUrl);
+      const ownerToken = new URLSearchParams(new URL(owner.openUrl).hash.slice(1)).get("visual-pair")!;
+      await authenticateOrigin(owner.gatewayUrl, "https://owner.example.test", ownerToken);
+      for (const origin of [`http://localhost:${appPort}`, `http://127.0.0.1:${appPort}`]) {
+        await expect(authenticateOrigin(owner.gatewayUrl, origin, ownerToken)).rejects.toThrow("Unexpected server response: 403");
+      }
 
       await closeVisualRemoteNext(root);
 
