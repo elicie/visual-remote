@@ -15,6 +15,7 @@ import { isWorkingTaskStatus, TaskService } from "../tasks/index.js";
 import type { BridgeControlContext } from "./control-context.js";
 import type { ControlService } from "./control-service.js";
 import { createTaskControlService } from "./task-control-service.js";
+import { ComparisonBrowser } from "../comparison/browser.js";
 
 function createAgentAdapter(agent: VisualDevConfig["agent"]): AgentAdapter {
   if (agent.adapter === "claude") {
@@ -76,6 +77,10 @@ export async function createDefaultControlService(
   });
   const storagePaths = await resolveStoragePaths(context.repoRoot, environment);
   const store = new SqliteTaskStore(storagePaths.databasePath);
+  const comparisonBrowser = new ComparisonBrowser({
+    profileDirectory: resolve(storagePaths.logsDirectory, "..", "comparison-browser"),
+    upstreamUrl: context.upstreamUrl,
+  });
   const taskService = new TaskService({
     projectId: context.projectId,
     workspaceRoot: context.workspaceRoot,
@@ -84,6 +89,7 @@ export async function createDefaultControlService(
     store,
     git,
     comparisonRoot: resolve(storagePaths.logsDirectory, "..", "comparisons"),
+    comparisonBrowser,
     maxRunMs: loaded.config.agent.maxRunMs,
     maxPending: loaded.config.queue.maxPending,
     resumeMode: loaded.config.agent.resumeMode,
@@ -95,6 +101,7 @@ export async function createDefaultControlService(
 
   const controlService = createTaskControlService({
     taskService,
+    openComparisonBrowser: (browserContext) => comparisonBrowser.open(browserContext),
     hmrWaitMs: loaded.config.verification.hmrWaitMs,
     verificationCommands: loaded.config.verification.commands,
     project: {
@@ -121,7 +128,11 @@ export async function createDefaultControlService(
     ...controlService,
     close: async () => {
       unsubscribeRuntime();
-      await controlService.close?.();
+      try {
+        await controlService.close?.();
+      } finally {
+        await comparisonBrowser.close();
+      }
     },
   };
 }

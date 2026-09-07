@@ -24,7 +24,6 @@ import {
   contextBundleSchema,
   normalizeComparisonRequest,
   type CaptureResult,
-  type ComparisonCaptureRequest,
   type ComparisonState,
   type ContextBundle,
   type ServerEvent,
@@ -59,7 +58,11 @@ export interface TaskServiceOptions {
   resumeMode?: "auto" | "new";
   environment?: Record<string, string>;
   comparisonRoot?: string;
-  captureComparison?: (taskId: string, context: ContextBundle, dimensions: { width: number; height: number }, signal: AbortSignal) => Promise<CaptureResult>;
+  comparisonBrowser?: {
+    begin(taskId: string, context: ContextBundle, signal: AbortSignal): Promise<void>;
+    capture(taskId: string, context: ContextBundle, dimensions: { width: number; height: number }, signal: AbortSignal): Promise<CaptureResult>;
+    finish(taskId: string): Promise<void>;
+  };
   idFactory?: () => string;
   now?: () => Date;
 }
@@ -181,7 +184,7 @@ export class TaskService {
   #draining = false;
   #closed = false;
   readonly #comparisonRoot: string | undefined;
-  #captureComparison: TaskServiceOptions["captureComparison"];
+  readonly #comparisonBrowser: TaskServiceOptions["comparisonBrowser"];
 
   constructor(options: TaskServiceOptions) {
     this.#projectId = options.projectId;
@@ -206,7 +209,7 @@ export class TaskService {
     this.#idFactory = options.idFactory ?? randomUUID;
     this.#now = options.now ?? (() => new Date());
     this.#comparisonRoot = options.comparisonRoot === undefined ? undefined : resolve(options.comparisonRoot);
-    this.#captureComparison = options.captureComparison;
+    this.#comparisonBrowser = options.comparisonBrowser;
     this.#recoverPersistedTasks();
   }
 
@@ -259,15 +262,6 @@ export class TaskService {
     this.#emit("task.queued", { task: publicTask(task) }, task.id);
     void this.#drain();
     return publicTask(task);
-  }
-
-  setComparisonCaptureHandler(handler: TaskServiceOptions["captureComparison"]): void {
-    this.#captureComparison = handler;
-  }
-
-  requestComparisonCapture(request: ComparisonCaptureRequest): void {
-    this.#requireTask(request.taskId);
-    this.#emit("comparison.capture_requested", request, request.taskId);
   }
 
   async getArtifact(artifactId: string) {
@@ -651,6 +645,7 @@ export class TaskService {
     let contextPath: string | undefined;
     let failure: unknown;
     let timedOut = false;
+    let comparisonStarted = false;
     const deadline = Date.now() + this.#maxRunMs;
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -716,6 +711,10 @@ export class TaskService {
         controller.signal.throwIfAborted();
       };
       if (context.request.comparison?.enabled) {
+        if (!this.#comparisonBrowser) throw new Error("Verification browser unavailable. Open the dedicated verification browser and retry.");
+        comparisonStarted = true;
+        await this.#comparisonBrowser.begin(taskId, context, controller.signal);
+        controller.signal.throwIfAborted();
         let root = await this.#resolveComparisonRoot();
         await mkdir(root, { recursive: true, mode: 0o700 });
         root = await realpath(root);
@@ -729,10 +728,7 @@ export class TaskService {
             preparation = false;
             await runAgent(combined);
           },
-          capture: async (dimensions) => {
-            if (!this.#captureComparison) throw new Error("Comparison capture unavailable. Connect the originating browser and explicitly share the current tab.");
-            return this.#captureComparison(taskId, context, dimensions, controller.signal);
-          },
+          capture: (dimensions) => this.#comparisonBrowser!.capture(taskId, context, dimensions, controller.signal),
           onState: (state) => this.#recordComparison(taskId, state),
         });
         controller.signal.throwIfAborted();
@@ -749,6 +745,16 @@ export class TaskService {
       if (comparison) this.#recordComparison(taskId, { ...comparison, status: this.#cancelRequested.has(taskId) ? "canceled" : "blocked", message: normalized.message });
       this.#recordAgentEvent(taskId, { type: "error", text: normalized.message });
     } finally {
+      if (comparisonStarted) {
+        try {
+          await this.#comparisonBrowser!.finish(taskId);
+        } catch (error) {
+          failure ??= error;
+          this.#recordAgentEvent(taskId, { type: "error", text: errorInfo(error).message });
+          const comparison = this.#requireTask(taskId).comparison;
+          if (comparison) this.#recordComparison(taskId, { ...comparison, status: this.#cancelRequested.has(taskId) ? "canceled" : "blocked", message: errorInfo(failure).message });
+        }
+      }
       clearTimeout(timeout);
       if (contextPath) await rm(contextPath, { force: true }).catch(() => undefined);
     }

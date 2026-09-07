@@ -4,8 +4,6 @@ import type { RawData, WebSocket } from "ws";
 import {
   clientMessageSchema,
   contextBundleSchema,
-  captureResultSchema,
-  type CaptureResult,
   type ClientMessage,
   type ContextBundle,
   type ServerEvent,
@@ -50,6 +48,7 @@ export interface TaskControlServiceOptions {
   browserSessions?: BrowserSessionManager;
   hmrWaitMs?: number;
   verificationCommands?: readonly VerificationCommand[];
+  openComparisonBrowser?: (context?: ContextBundle) => Promise<{ status: "ready"; message: string }>;
 }
 
 interface TaskRequest {
@@ -140,13 +139,12 @@ function rawText(data: RawData): string {
   return data.toString("utf8");
 }
 
-function parseClientMessage(data: RawData, allowLargeCapture?: (message: ClientMessage) => boolean): ClientMessage | undefined {
+function parseClientMessage(data: RawData): ClientMessage | undefined {
   const byteLength = typeof data === "string" ? Buffer.byteLength(data) : Array.isArray(data) ? data.reduce((total, chunk) => total + chunk.byteLength, 0) : data.byteLength;
-  if (byteLength > 24 * 1024 * 1024 || (byteLength > 1024 * 1024 && !allowLargeCapture)) return undefined;
+  if (byteLength > 1024 * 1024) return undefined;
   try {
     const result = clientMessageSchema.safeParse(JSON.parse(rawText(data)) as unknown);
     if (!result.success) return undefined;
-    if (byteLength > 1024 * 1024 && (result.data.type !== "comparison.capture_result" || !allowLargeCapture?.(result.data))) return undefined;
     return result.data;
   } catch {
     return undefined;
@@ -269,32 +267,6 @@ export function createTaskControlService(
   const verificationRuns = new Set<Promise<void>>();
   let closed = false;
   const controlSessions = new Map<WebSocket, string>();
-  const pendingCaptures = new Map<string, {
-    taskId: string; browserSessionId: string; socket: WebSocket;
-    finish: (result?: CaptureResult, error?: Error) => void;
-  }>();
-  taskService.setComparisonCaptureHandler((taskId, context, dimensions, signal) => {
-    if (closed || signal.aborted) return Promise.reject(signal.reason ?? new Error("Comparison capture canceled"));
-    const socket = [...controlSessions].find(([candidate, session]) => session === context.browserSessionId && candidate.readyState === 1)?.[0];
-    if (!socket) return Promise.reject(new Error("Origin browser disconnected. Reconnect and share the current tab before comparing."));
-    const requestId = randomUUID();
-    return new Promise<CaptureResult>((resolveCapture, rejectCapture) => {
-      const abort = () => finish(undefined, signal.reason instanceof Error ? signal.reason : new Error("Comparison capture canceled"));
-      const timeout = setTimeout(() => finish(undefined, new Error("Comparison capture timed out after 60 seconds. Check current-tab sharing.")), 60_000);
-      timeout.unref();
-      const finish = (result?: CaptureResult, error?: Error): void => {
-        if (!pendingCaptures.delete(requestId)) return;
-        clearTimeout(timeout);
-        signal.removeEventListener("abort", abort);
-        if (error) rejectCapture(error);
-        else if (result) resolveCapture(result);
-      };
-      pendingCaptures.set(requestId, { taskId, browserSessionId: context.browserSessionId, socket, finish });
-      signal.addEventListener("abort", abort, { once: true });
-      if (signal.aborted) { abort(); return; }
-      taskService.requestComparisonCapture({ requestId, taskId, browserSessionId: context.browserSessionId, ...dimensions });
-    });
-  });
 
   const finalizeVerification = (taskId: string, force: boolean): void => {
     const pending = pendingVerifications.get(taskId);
@@ -458,11 +430,7 @@ export function createTaskControlService(
     const unsubscribe = taskService.subscribe((event) => send(socket, event));
 
     const handleMessage = (data: RawData) => {
-      const message = parseClientMessage(data, (candidate) => {
-        const payload = recordOf(candidate.payload);
-        const pending = typeof payload?.requestId === "string" ? pendingCaptures.get(payload.requestId) : undefined;
-        return pending !== undefined && pending.socket === socket && pending.taskId === payload?.taskId && pending.browserSessionId === candidate.browserSessionId && controlSessions.get(socket) === candidate.browserSessionId;
-      });
+      const message = parseClientMessage(data);
       if (message === undefined) {
         send(socket, {
           type: "command.error",
@@ -485,14 +453,6 @@ export function createTaskControlService(
           for (const event of taskService.replay(lastSeq)) {
             send(socket, event);
           }
-          return;
-        }
-        if (message.type === "comparison.capture_result") {
-          const result = captureResultSchema.safeParse(message.payload);
-          if (!result.success) return;
-          const pending = pendingCaptures.get(result.data.requestId);
-          if (!pending || pending.socket !== socket || pending.taskId !== result.data.taskId || pending.browserSessionId !== message.browserSessionId || controlSessions.get(socket) !== message.browserSessionId) return;
-          pending.finish(result.data);
           return;
         }
         if (message.type === "browser.heartbeat") {
@@ -613,9 +573,6 @@ export function createTaskControlService(
     return () => {
       socket.off("message", handleMessage);
       controlSessions.delete(socket);
-      for (const pending of pendingCaptures.values()) {
-        if (pending.socket === socket) pending.finish(undefined, new Error("Origin browser disconnected during comparison capture"));
-      }
       unsubscribe();
     };
   };
@@ -713,6 +670,14 @@ export function createTaskControlService(
     }),
     listTasks: (request) => taskService.list(request),
     createTask,
+    openComparisonBrowser: async (payload) => {
+      if (closed) throw new ControlServiceError(503, "bridge_closed", "Bridge is closed");
+      if (!options.openComparisonBrowser) throw new ControlServiceError(503, "comparison_browser_unavailable", "Verification browser is unavailable");
+      const record = recordOf(payload ?? {});
+      if (!record || Object.keys(record).some((key) => key !== "context")) throw new ControlServiceError(400, "invalid_browser_request", "Expected an optional context, not a navigation URL");
+      const context = record.context === undefined ? undefined : sanitizeContextBundle(contextBundleSchema.parse(record.context));
+      return options.openComparisonBrowser(context);
+    },
     getTask: (taskId) => taskService.get(taskId),
     getTaskDiff: (taskId) => taskAction(() => ({ diff: taskService.diff(taskId) })),
     getTaskFiles: (taskId) => taskAction(() => ({ files: taskService.files(taskId) })),
@@ -731,8 +696,6 @@ export function createTaskControlService(
     connectViewerWebSocket,
     close: async () => {
       closed = true;
-      taskService.setComparisonCaptureHandler(undefined);
-      for (const pending of pendingCaptures.values()) pending.finish(undefined, new Error("Bridge closed during comparison capture"));
       controlSessions.clear();
       unsubscribeVerification();
       verificationAbort.abort();

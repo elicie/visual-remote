@@ -22,6 +22,7 @@ export interface ControlService {
   project(): Awaitable<unknown>;
   listTasks?(request?: TaskListRequest): Awaitable<unknown>;
   createTask?(payload: unknown): Awaitable<unknown>;
+  openComparisonBrowser?(payload: unknown): Awaitable<unknown>;
   getTask?(taskId: string): Awaitable<unknown | undefined>;
   getTaskDiff?(taskId: string): Awaitable<unknown | undefined>;
   getTaskFiles?(taskId: string): Awaitable<unknown | undefined>;

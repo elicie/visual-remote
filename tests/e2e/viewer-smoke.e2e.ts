@@ -730,8 +730,25 @@ test("viewer preserves full persisted and live multiline logs with older entries
   await expect(logs.getByText("live entry 0", { exact: true })).toHaveCount(1);
 });
 
-test("Figma auto detection requires consent and explicit opt-out preserves normal requests", async ({ page }) => {
-  const frames: Array<{ type: string; payload?: { request?: { comparison?: { enabled: boolean } } } }> = [];
+async function forbidMediaCapture(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const forbidden = () => {
+      document.documentElement.dataset.mediaCalls = String(Number(document.documentElement.dataset.mediaCalls ?? 0) + 1);
+      throw new Error("The user's tab must never be captured");
+    };
+    const devices = navigator.mediaDevices ?? {};
+    if (!navigator.mediaDevices) Object.defineProperty(navigator, "mediaDevices", { value: devices });
+    for (const name of ["getDisplayMedia", "getUserMedia", "setCaptureHandleConfig"]) {
+      Object.defineProperty(devices, name, { configurable: true, value: forbidden });
+    }
+  });
+}
+
+test("Figma auto detection submits without browser setup and explicit opt-out preserves normal requests", async ({ page }) => {
+  await forbidMediaCapture(page);
+  const frames: Array<{ type: string; payload?: { request?: { comparison?: { enabled: boolean; url?: string } }; selection?: { targets?: unknown[] } } }> = [];
+  let browserOpens = 0;
+  await page.route("**/_visual/api/comparison-browser", (route) => { browserOpens++; return route.fulfill({ json: { status: "ready", message: "Ready" } }); });
   await page.route("**/_visual/bootstrap", (route) => route.fulfill({ json: { authMode: "local", projectId: "browser-fixture" } }));
   await page.route(/\/_visual\/api\/tasks(?:\?.*)?$/u, (route) => route.fulfill({ json: [] }));
   await page.routeWebSocket("**/_visual/ws", (socket) => socket.onMessage((raw) => {
@@ -739,82 +756,80 @@ test("Figma auto detection requires consent and explicit opt-out preserves norma
     if (frame.type === "session.open") socket.send(JSON.stringify({ type: "session.ready", projectId: "browser-fixture", payload: { access: "control" } }));
   }));
   await page.goto(fixture.origin);
+  await page.locator("#primary").evaluate((element) => element.setAttribute("aria-expanded", "true"));
   await page.getByRole("button", { name: "Save changes" }).click();
   const request = page.getByPlaceholder("선택한 화면을 어떻게 바꿀까요?");
-  await request.fill("Match https://www.figma.com/design/Abc/Frame?node-id=1-2");
+  const url = "https://www.figma.com/design/Abc/Frame?node-id=1-2";
+  await request.fill(`Match ${url}`);
   const compare = page.getByRole("checkbox", { name: "Figma 디자인과 자동 비교" });
   await expect(compare).toBeChecked();
-  await expect(page.getByRole("button", { name: "요청 보내기" })).toBeDisabled();
-  await expect(page.getByRole("textbox", { name: "Figma 프레임 링크" })).toHaveValue("https://www.figma.com/design/Abc/Frame?node-id=1-2");
+  await expect(page.getByRole("button", { name: "요청 보내기" })).toBeEnabled();
+  await expect(page.getByRole("textbox", { name: "Figma 프레임 링크" })).toHaveValue(url);
+  await page.getByRole("button", { name: "요청 보내기" }).click();
+  await expect.poll(() => frames.filter((frame) => frame.type === "task.create").length).toBe(1);
+  expect(frames.find((frame) => frame.type === "task.create")?.payload?.request?.comparison).toMatchObject({ enabled: true, url });
+  expect(frames.find((frame) => frame.type === "task.create")?.payload?.selection?.targets).toHaveLength(1);
+  expect(frames.find((frame) => frame.type === "task.create")?.payload?.selection?.targets?.[0]).toMatchObject({ dom: { attributes: { "aria-expanded": "true" } } });
+  await page.getByRole("button", { name: "작업 최소화", exact: true }).click();
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await request.fill(`Another comparison ${url}`);
+  await page.getByRole("button", { name: "요청 보내기" }).click();
+  await expect.poll(() => frames.filter((frame) => frame.type === "task.create").length).toBe(2);
+  expect(frames.filter((frame) => frame.type === "task.create")[1]?.payload?.request?.comparison).toMatchObject({ enabled: true, url });
+  await page.getByRole("button", { name: "작업 최소화", exact: true }).click();
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await request.fill(`Normal edit mentioning ${url}`);
   await compare.uncheck();
   await page.getByRole("button", { name: "요청 보내기" }).click();
-  await expect.poll(() => frames.find((frame) => frame.type === "task.create")?.payload?.request?.comparison?.enabled).toBe(false);
+  await expect.poll(() => frames.filter((frame) => frame.type === "task.create").length).toBe(3);
+  expect(frames.filter((frame) => frame.type === "task.create")[2]?.payload?.request?.comparison?.enabled).toBe(false);
+  expect(browserOpens).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.dataset.mediaCalls ?? "0")).toBe("0");
 });
 
-test("capture control requests bypass hydration and active-task routing", async ({ page }) => {
-  const responses: Array<{ type: string; payload?: { requestId?: string; error?: string } }> = [];
-  let sessionId = "";
-  const socketReady = deferred<WebSocketRoute>();
-  await page.route("**/_visual/bootstrap", (route) => route.fulfill({ json: { authMode: "local", projectId: "browser-fixture" } }));
-  await page.route(/\/_visual\/api\/tasks(?:\?.*)?$/u, async (route) => { await delay(4500); await route.fulfill({ json: [] }); });
-  await page.routeWebSocket("**/_visual/ws", (socket) => socket.onMessage((raw) => {
-    const frame = JSON.parse(String(raw)); responses.push(frame);
-    if (frame.type === "session.open") socket.send(JSON.stringify({ type: "session.ready", projectId: "browser-fixture", payload: { access: "control" } }));
-    if (frame.type === "browser.hello") { sessionId = frame.browserSessionId; socketReady.resolve(socket); }
-  }));
-  await page.goto(fixture.origin);
-  const socket = await socketReady.promise;
-  const taskId = randomUUID(), requestId = randomUUID();
-  socket.send(JSON.stringify({ seq: 1, type: "comparison.capture_requested", projectId: "browser-fixture", taskId, createdAt: new Date().toISOString(), payload: { taskId, requestId, browserSessionId: sessionId, width: 100, height: 100 } }));
-  await expect.poll(() => responses.find((frame) => frame.type === "comparison.capture_result"), { timeout: 2000 }).toMatchObject({ payload: { taskId, requestId, error: expect.stringContaining("컨텍스트") } });
-  const wrongRequest = randomUUID();
-  socket.send(JSON.stringify({ seq: 2, type: "comparison.capture_requested", projectId: "browser-fixture", taskId, createdAt: new Date().toISOString(), payload: { taskId, requestId: wrongRequest, browserSessionId: randomUUID(), width: 100, height: 100 } }));
-  await page.getByRole("button", { name: "Save changes" }).click();
-  expect(responses.some((frame) => frame.payload?.requestId === wrongRequest)).toBe(false);
-});
-
-test("fake media transport captures PNG, restores overlay, and rejects a different tab handle", async ({ page }) => {
-  await page.addInitScript(() => {
-    let handle = "";
-    Object.defineProperty(navigator.mediaDevices, "setCaptureHandleConfig", { value: (config: { handle: string }) => { handle = config.handle; } });
-    Object.defineProperty(navigator.mediaDevices, "getDisplayMedia", { value: async () => {
-      if (!handle) throw new Error("Capture handle must be configured before acquisition");
-      const canvas = document.createElement("canvas"); canvas.width = innerWidth; canvas.height = innerHeight;
-      const draw = () => { const context = canvas.getContext("2d")!; context.fillStyle = "rgb(31,111,235)"; context.fillRect(0, 0, canvas.width, canvas.height); if (track.readyState === "live") requestAnimationFrame(draw); };
-      const stream = canvas.captureStream(30), track = stream.getVideoTracks()[0]!;
-      Object.defineProperty(track, "getSettings", { value: () => ({ displaySurface: "browser" }) });
-      Object.defineProperty(track, "getCaptureHandle", { value: () => ({ handle: document.documentElement.dataset.wrongTab ? "another-tab" : handle, origin: location.origin }) });
-      draw(); return stream;
-    } });
+for (const authMode of ["local", "token"] as const) {
+  test(`verification browser opens only on click with busy and retryable errors (${authMode})`, async ({ page }) => {
+    await forbidMediaCapture(page);
+    const release = deferred<void>();
+    let browserOpens = 0;
+    await page.route("**/_visual/bootstrap", (route) => route.fulfill({ json: { authMode, projectId: "browser-fixture" } }));
+    await page.route(/\/_visual\/api\/tasks(?:\?.*)?$/u, (route) => route.fulfill({ json: [] }));
+    await page.routeWebSocket("**/_visual/ws", (socket) => socket.onMessage((raw) => {
+      const frame = JSON.parse(String(raw));
+      if (frame.type === "session.open") socket.send(JSON.stringify({ type: "session.ready", projectId: "browser-fixture", payload: { access: "control" } }));
+      if (frame.type === "auth") socket.send(JSON.stringify({ type: "auth.ok", projectId: "browser-fixture", payload: { access: "control" } }));
+    }));
+    await page.route("**/_visual/api/comparison-browser", async (route) => {
+      browserOpens++;
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().postDataJSON()).toEqual({});
+      expect(route.request().headers().authorization).toBe(authMode === "token" ? `Bearer ${controlToken}` : undefined);
+      if (browserOpens === 1) {
+        await release.promise;
+        await route.fulfill({ status: 409, body: "비교 작업이 진행 중입니다. 완료 후 다시 시도하세요." });
+      } else await route.fulfill({ json: { status: "ready", message: "검증 브라우저가 열렸습니다." } });
+    });
+    await page.goto(`${fixture.origin}${authMode === "token" ? `#visual-pair=${controlToken}` : ""}`);
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await page.getByPlaceholder("선택한 화면을 어떻게 바꿀까요?").fill("Match https://www.figma.com/design/Abc/Frame?node-id=1-2");
+    const viewport = page.viewportSize();
+    const location = page.url();
+    expect(browserOpens).toBe(0);
+    await page.getByRole("button", { name: "검증 브라우저 열기", exact: true }).click();
+    await expect(page.getByRole("button", { name: "검증 브라우저 여는 중…" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "요청 보내기" })).toBeEnabled();
+    release.resolve();
+    await expect(page.getByRole("alert")).toContainText("비교 작업이 진행 중입니다");
+    await page.getByRole("button", { name: "검증 브라우저 열기", exact: true }).click();
+    await expect(page.getByText("검증 브라우저가 열렸습니다.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    expect(browserOpens).toBe(2);
+    expect(page.viewportSize()).toEqual(viewport);
+    expect(page.url()).toBe(location);
+    await expect(page.getByRole("navigation", { name: "Visual Bridge 도구" })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.dataset.mediaCalls ?? "0")).toBe("0");
   });
-  const results: Array<{ type: string; payload?: { pngBase64?: string; width?: number; height?: number; error?: string; requestId?: string } }> = [];
-  await page.route("**/_visual/bootstrap", (route) => route.fulfill({ json: { authMode: "local", projectId: "browser-fixture" } }));
-  await page.route(/\/_visual\/api\/tasks(?:\?.*)?$/u, (route) => route.fulfill({ json: [] }));
-  const taskId = randomUUID(), requestId = randomUUID();
-  await page.routeWebSocket("**/_visual/ws", (socket) => socket.onMessage((raw) => {
-    const frame = JSON.parse(String(raw)); results.push(frame);
-    if (frame.type === "session.open") socket.send(JSON.stringify({ type: "session.ready", projectId: "browser-fixture", payload: { access: "control" } }));
-    if (frame.type === "task.create") {
-      const createdAt = new Date().toISOString();
-      socket.send(JSON.stringify({ seq: 1, type: "task.queued", projectId: "browser-fixture", taskId, createdAt, payload: { task: { id: taskId, originBrowserSessionId: frame.browserSessionId, requestText: frame.payload.request.text, scope: "page", status: "queued", changedFiles: [] } } }));
-      socket.send(JSON.stringify({ seq: 2, type: "comparison.capture_requested", projectId: "browser-fixture", taskId, createdAt, payload: { taskId, requestId, browserSessionId: frame.browserSessionId, ...frame.payload.page.viewport } }));
-    }
-  }));
-  await page.goto(fixture.origin);
-  await page.getByRole("navigation", { name: "Visual Bridge 도구" }).getByRole("button", { name: "페이지", exact: true }).click();
-  await page.getByPlaceholder("선택한 화면을 어떻게 바꿀까요?").fill("Compare https://www.figma.com/design/fixture/Test?node-id=1-2");
-  await page.evaluate(() => { document.documentElement.dataset.wrongTab = "true"; });
-  await page.getByRole("button", { name: "현재 탭 공유", exact: true }).click();
-  await expect(page.getByText(/공유한 화면이 현재 탭인지 확인할 수 없습니다/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "요청 보내기" })).toBeDisabled();
-  await page.evaluate(() => { delete document.documentElement.dataset.wrongTab; });
-  await page.getByRole("button", { name: "현재 탭 공유", exact: true }).click();
-  await expect(page.getByRole("button", { name: "탭 공유 중지" })).toBeVisible();
-  await page.getByRole("button", { name: "요청 보내기" }).click();
-  await expect.poll(() => results.find((frame) => frame.type === "comparison.capture_result"), { timeout: 15_000 }).toMatchObject({ payload: { requestId, width: 1280, height: 900, pngBase64: expect.stringMatching(/^iVBOR/) } });
-  expect(results.find((frame) => frame.type === "comparison.capture_result")?.payload?.error).toBeUndefined();
-  await expect(page.getByRole("navigation", { name: "Visual Bridge 도구" })).toBeVisible();
-});
+}
 
 test("viewer displays recorded comparison criteria and authorized PNG evidence", async ({ page }) => {
   const task = { ...overlayTask("comparison-viewer", "comparison-session", "review"), comparison: {
@@ -847,28 +862,11 @@ test("viewer displays recorded comparison criteria and authorized PNG evidence",
   expect(modes).toEqual(["viewer", "viewer", "viewer", "viewer"]);
 });
 
-test("comparison completes real control engine storage and viewer flow with a synthetic media source", async ({ page, request, context }) => {
+test("comparison completes real verification browser control engine storage and viewer flow", async ({ page, request, context }) => {
   const comparisonFixture = await startFixture("local", true);
   try {
-    // Only the browser media source is synthetic. Task APIs, agent fixture preparation,
-    // capture transport, PNG comparison, private artifact storage and viewer are real.
-    await page.addInitScript(() => {
-      let handle = "";
-      Object.defineProperty(navigator.mediaDevices, "setCaptureHandleConfig", { value: (config: { handle: string }) => { handle = config.handle; } });
-      Object.defineProperty(navigator.mediaDevices, "getDisplayMedia", { value: async () => {
-        if (!handle) throw new Error("Capture handle must be configured before acquisition");
-        const canvas = document.createElement("canvas"); canvas.width = innerWidth; canvas.height = innerHeight;
-        const stream = canvas.captureStream(30), track = stream.getVideoTracks()[0]!;
-        Object.defineProperty(track, "getSettings", { value: () => ({ displaySurface: "browser" }) });
-        Object.defineProperty(track, "getCaptureHandle", { value: () => ({ handle, origin: location.origin }) });
-        const draw = () => {
-          const drawing = canvas.getContext("2d")!;
-          drawing.fillStyle = "rgb(31,111,235)"; drawing.fillRect(0, 0, canvas.width, canvas.height);
-          if (track.readyState === "live") requestAnimationFrame(draw);
-        };
-        draw(); return stream;
-      } });
-    });
+    // The fixture agent supplies the reference; the dedicated server browser captures the app.
+    await forbidMediaCapture(page);
     await page.goto(comparisonFixture.origin);
     await expect(page.getByRole("navigation", { name: "Visual Bridge 도구" })).toBeVisible();
     await page.evaluate(() => {
@@ -880,18 +878,16 @@ test("comparison completes real control engine storage and viewer flow with a sy
     await page.locator("#comparison-target").click();
     const text = "Match https://www.figma.com/design/fixture/Test?node-id=1-2";
     await page.getByPlaceholder("선택한 화면을 어떻게 바꿀까요?").fill(text);
-    await page.getByRole("button", { name: "현재 탭 공유", exact: true }).click();
-    await expect(page.getByRole("button", { name: "탭 공유 중지" })).toBeVisible();
     await page.getByRole("button", { name: "요청 보내기" }).click();
     let taskId = "";
     await expect.poll(async () => {
       const response = await request.get(`${comparisonFixture.origin}/_visual/api/tasks`);
       expect(response.ok()).toBe(true);
-      const tasks = await response.json() as Array<{ id: string; requestText: string; comparison?: { status: string } }>;
+      const tasks = await response.json() as Array<{ id: string; requestText: string; comparison?: { status: string; message?: string }; error?: { message?: string } }>;
       const task = tasks.find((item) => item.requestText === text);
       taskId = task?.id ?? "";
-      return task?.comparison?.status;
-    }, { timeout: 25_000 }).toBe("passed");
+      return { status: task?.comparison?.status, message: task?.comparison?.message, error: task?.error?.message };
+    }, { timeout: 25_000 }).toMatchObject({ status: "passed" });
     expect(taskId).not.toBe("");
     const viewer = await context.newPage();
     await viewer.goto(`${comparisonFixture.origin}/_visual/viewer`);
@@ -902,14 +898,16 @@ test("comparison completes real control engine storage and viewer flow with a sy
     await expect(panel.getByRole("img")).toHaveCount(4);
     await expect.poll(() => panel.getByRole("img").evaluateAll((images) => images.every((image) => image instanceof HTMLImageElement && image.complete && image.naturalWidth === 64 && image.naturalHeight === 64))).toBe(true);
     await expect(page.getByRole("navigation", { name: "Visual Bridge 도구" })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.dataset.mediaCalls ?? "0")).toBe("0");
     await viewer.close();
     await page.getByRole("button", { name: "후속 수정", exact: true }).click();
     await page.getByRole("textbox", { name: "후속 수정 내용" }).fill("Keep matching the same frame without repeating its link");
     await page.getByRole("button", { name: "후속 요청 보내기", exact: true }).click();
     await expect.poll(async () => {
       const response = await request.get(`${comparisonFixture.origin}/_visual/api/tasks`);
-      const tasks = await response.json() as Array<{ parentTaskId?: string; comparison?: { status: string } }>;
-      return tasks.find((item) => item.parentTaskId === taskId)?.comparison?.status;
-    }, { timeout: 25_000 }).toBe("passed");
+      const tasks = await response.json() as Array<{ parentTaskId?: string; comparison?: { status: string; message?: string }; error?: { message?: string } }>;
+      const task = tasks.find((item) => item.parentTaskId === taskId);
+      return { status: task?.comparison?.status, message: task?.comparison?.message, error: task?.error?.message };
+    }, { timeout: 25_000 }).toMatchObject({ status: "passed" });
   } finally { await stopFixture(comparisonFixture); }
 });

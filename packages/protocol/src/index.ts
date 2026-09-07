@@ -95,16 +95,15 @@ export function normalizeComparisonRequest(text: string, explicit?: Partial<Comp
 
 export const comparisonMeasuredTargetSchema = z.object({ text: z.string(), rect: rectSchema, styles: z.record(z.string(), z.string()) });
 export type ComparisonMeasuredTarget = z.infer<typeof comparisonMeasuredTargetSchema>;
-export const captureResultSchema = z.object({
-  requestId: z.string().uuid(), taskId: z.string().uuid(),
-  pngBase64: z.string().max(22_369_624).optional(),
-  width: z.number().int().positive().max(8192).optional(),
-  height: z.number().int().positive().max(8192).optional(),
-  targets: z.array(comparisonMeasuredTargetSchema).max(2000).optional(),
-  error: z.string().max(4000).optional(),
-});
-export type CaptureResult = z.infer<typeof captureResultSchema>;
-export interface ComparisonCaptureRequest { requestId: string; taskId: string; browserSessionId: string; width: number; height: number }
+export interface CaptureResult {
+  requestId: string;
+  taskId: string;
+  pngBase64?: string;
+  width?: number;
+  height?: number;
+  targets?: ComparisonMeasuredTarget[];
+  error?: string;
+}
 export interface ComparisonIteration {
   iteration: number; overallMatch: number; regions: Record<string, number>; structuralMismatches: number; missingTargets: number;
   issues: string[]; referenceArtifactId: string; screenshotArtifactId: string; heatmapArtifactId: string; overlayArtifactId: string;
@@ -173,7 +172,6 @@ export const clientMessageSchema = z.object({
     "task.accept",
     "task.revert",
     "task.follow_up",
-    "comparison.capture_result",
   ]),
   browserSessionId: z.string().uuid(),
   payload: z.unknown(),

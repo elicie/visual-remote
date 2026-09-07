@@ -82,7 +82,9 @@ describe("TaskService", () => {
     let captures = 0;
     const url = "https://www.figma.com/design/ABC/frame?node-id=1-2";
     let runs = 0;
+    const lifecycle: string[] = [];
     const adapter = new FakeAgentAdapter(async (input) => {
+      lifecycle.push("agent");
       runs++;
       if (runs === 1) {
         expect(input.prompt).not.toContain("change tracked content");
@@ -96,12 +98,20 @@ describe("TaskService", () => {
       return [{ type: "session", sessionId: "comparison-session" }];
     });
     const service = new TaskService({ projectId: "fixture-project", adapter, store: new SqliteTaskStore(":memory:"), git: manager, comparisonRoot: root,
-      captureComparison: async (taskId, _context, dimensions) => ({ requestId: crypto.randomUUID(), taskId, ...dimensions, targets: [], pngBase64: (++captures === 1 ? differentBytes : bytes).toString("base64") }),
+      comparisonBrowser: {
+        begin: async () => { lifecycle.push("begin"); },
+        capture: async (taskId, _context, dimensions) => {
+          lifecycle.push("capture");
+          return { requestId: crypto.randomUUID(), taskId, ...dimensions, targets: [], pngBase64: (++captures === 1 ? differentBytes : bytes).toString("base64") };
+        },
+        finish: async () => { lifecycle.push("finish"); },
+      },
     });
     const task = service.create(context(`change tracked content to match ${url}`));
     await service.waitForIdle();
     expect(service.get(task.id)).toMatchObject({ status: "review", comparison: { status: "passed", iteration: 2 } });
     expect(runs).toBe(3);
+    expect(lifecycle).toEqual(["begin", "agent", "agent", "capture", "agent", "capture", "finish"]);
     expect(snapshots.mock.calls.map((call) => call[1])).toEqual(["before", "after"]);
     expect(service.diff(task.id)).toContain("comparison run 3");
     const state = service.get(task.id)!.comparison!;
@@ -110,13 +120,66 @@ describe("TaskService", () => {
     await service.close();
   });
 
-  it("blocks unavailable reference access rather than reporting a fabricated pass", async () => {
+  it("blocks unavailable verification browsers before running any agent", async () => {
     const fixture = await createFixtureRepository();
     cleanups.push(fixture.parent);
     const service = new TaskService({ projectId: "fixture-project", adapter: new FakeAgentAdapter(), store: new SqliteTaskStore(":memory:"), git: await GitTransactionManager.open(fixture.root), comparisonRoot: resolve(fixture.parent, "comparisons") });
     const task = service.create(context("Match https://www.figma.com/design/ABC/frame?node-id=1-2"));
     await service.waitForIdle();
     expect(service.get(task.id)).toMatchObject({ status: "failed", comparison: { status: "blocked", iterations: [] } });
+    expect(service.get(task.id)?.comparison?.message).toContain("Verification browser unavailable");
+    await service.close();
+  });
+
+  it.each(["preflight", "reference", "cleanup", "canceled"] as const)("finalizes %s failures before releasing the next writer", async (stage) => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const manager = await GitTransactionManager.open(fixture.root);
+    const snapshots = vi.spyOn(manager, "createSnapshot");
+    const lifecycle: string[] = [];
+    let releaseFinish!: () => void;
+    let enteredFinish!: () => void;
+    const finishing = new Promise<void>((resolveFinish) => { enteredFinish = resolveFinish; });
+    const finishGate = new Promise<void>((resolveFinish) => { releaseFinish = resolveFinish; });
+    let enteredBegin!: () => void;
+    const beginning = new Promise<void>((resolveBegin) => { enteredBegin = resolveBegin; });
+    const adapter = new FakeAgentAdapter(async () => { lifecycle.push("agent"); return []; });
+    const service = new TaskService({ projectId: "fixture-project", adapter, store: new SqliteTaskStore(":memory:"), git: manager,
+      comparisonRoot: resolve(fixture.parent, "comparisons"),
+      comparisonBrowser: {
+        begin: async (_taskId, _context, signal) => {
+          lifecycle.push("begin");
+          enteredBegin();
+          if (stage === "canceled") await new Promise<void>((_resolve, reject) => {
+            if (signal.aborted) reject(signal.reason);
+            else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+          if (stage === "preflight" || stage === "cleanup") throw new Error("Selected state cannot be reproduced");
+        },
+        capture: async () => { throw new Error("Capture must not run"); },
+        finish: async () => {
+          lifecycle.push("finish-start");
+          enteredFinish();
+          await finishGate;
+          lifecycle.push("finish-end");
+          if (stage === "cleanup") throw new Error("Page close failed");
+        },
+      },
+    });
+    const first = service.create(context("Match https://www.figma.com/design/ABC/frame?node-id=1-2"));
+    const second = service.create(context("Normal task"));
+    await beginning;
+    if (stage === "canceled") service.cancel(first.id);
+    await finishing;
+    expect(service.get(second.id)?.status).toBe("queued");
+    expect(adapter.runs).toHaveLength(stage === "reference" ? 1 : 0);
+    releaseFinish();
+    await service.waitForIdle();
+    expect(service.get(first.id)).toMatchObject({ status: stage === "canceled" ? "canceled" : "failed", comparison: { status: stage === "canceled" ? "canceled" : "blocked" } });
+    if (stage === "preflight" || stage === "cleanup") expect(service.get(first.id)?.comparison?.message).toBe("Selected state cannot be reproduced");
+    expect(service.get(second.id)?.status).toBe("review");
+    expect(lifecycle.slice(-2)).toEqual(["finish-end", "agent"]);
+    expect(snapshots.mock.calls.map((call) => call[1])).toEqual(["before", "after", "before", "after"]);
     await service.close();
   });
 

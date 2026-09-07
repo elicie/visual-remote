@@ -1,6 +1,6 @@
 {
   "name": "visual-remote",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Visual bridge from a running web UI to a coding agent in its Git worktree",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
@@ -66,6 +66,7 @@
   "dependencies": {
     "commander": "^15.0.0",
     "http-proxy": "^1.18.1",
+    "playwright": "1.62.1",
     "pngjs": "7.0.0",
     "ws": "^8.21.1",
     "yaml": "^2.9.0",

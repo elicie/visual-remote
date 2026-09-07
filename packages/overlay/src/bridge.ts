@@ -437,6 +437,19 @@ async function responseValue(response: Response): Promise<unknown> {
   return text ? safeJsonParse(text) : null;
 }
 
+export async function openComparisonBrowser(token: string, options: BridgeRequestOptions = {}): Promise<{ status: "ready"; message: string }> {
+  const value = recordOf(await responseValue(await authorizedFetch(
+    token,
+    "/_visual/api/comparison-browser",
+    { method: "POST", body: JSON.stringify({}) },
+    options,
+  )));
+  if (value?.status !== "ready" || typeof value.message !== "string") {
+    throw new Error("검증 브라우저의 준비 상태를 확인하지 못했습니다. 다시 시도하세요.");
+  }
+  return { status: "ready", message: value.message };
+}
+
 export async function fetchViewerUrl(token: string): Promise<string> {
   const value = await responseValue(
     await authorizedFetch(token, "/_visual/api/viewer-session"),

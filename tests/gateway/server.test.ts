@@ -197,6 +197,22 @@ describe("Gateway server", () => {
     expect(createTask).toHaveBeenCalledOnce();
   });
 
+  it.each(["local", "token"] as const)("guards verification browser setup in %s mode", async (authMode) => {
+    const openComparisonBrowser = vi.fn(async (payload: unknown) => ({ status: "ready", payload }));
+    const url = await startGateway({ health: () => ({ status: "ok" }), project: () => ({ id: "fixture" }), openComparisonBrowser }, { authMode, ...(authMode === "local" ? { allowedOrigins: [] } : {}) });
+    const endpoint = `${url}/_visual/api/comparison-browser`;
+    const viewerHeaders: Record<string, string> = authMode === "local"
+      ? { "X-Visual-Mode": "viewer" }
+      : { authorization: "Bearer fixture-viewer-token", origin: "https://allowed.example" };
+    expect((await fetch(endpoint, { method: "POST", headers: { ...viewerHeaders, "content-type": "application/json" }, body: "{}" })).status).toBe(403);
+    expect(openComparisonBrowser).not.toHaveBeenCalled();
+    if (authMode === "token") expect((await fetch(endpoint, { method: "POST", body: "{}" })).status).toBe(401);
+    const headers: Record<string, string> = authMode === "local" ? { "content-type": "application/json" } : { "content-type": "application/json", authorization: "Bearer fixture-token", origin: "https://allowed.example" };
+    const response = await fetch(endpoint, { method: "POST", headers, body: "{}" });
+    expect(response.status).toBe(200);
+    expect(openComparisonBrowser).toHaveBeenCalledExactlyOnceWith({});
+  });
+
   it("rejects foreign local hosts and origins across visual resources, not upstream", async () => {
     const url = await startGateway({
       health: () => ({ status: "ok" }), project: () => ({ id: "fixture" }),

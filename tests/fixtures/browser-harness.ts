@@ -13,6 +13,7 @@ import {
   SqliteTaskStore,
   TaskService,
 } from "@visual-remote/bridge-core";
+import { ComparisonBrowser } from "../../packages/bridge-core/src/comparison/browser.js";
 import { createGatewayServer } from "@visual-remote/gateway";
 
 const gatewayPort = Number.parseInt(
@@ -110,6 +111,11 @@ const adapter = new FakeAgentAdapter(async (input) => {
   ];
 });
 const comparisonRoot = await mkdtemp(join(tmpdir(), "visual-comparison-fixture-"));
+const comparisonBrowser = new ComparisonBrowser({
+  profileDirectory: join(comparisonRoot, "browser-profile"),
+  upstreamUrl: `http://127.0.0.1:${upstreamPort}`,
+  headless: true,
+});
 const taskService = new TaskService({
   projectId,
   workspaceRoot: repoRoot,
@@ -117,10 +123,12 @@ const taskService = new TaskService({
   store: new SqliteTaskStore(":memory:"),
   git: gitManager,
   comparisonRoot,
+  comparisonBrowser,
 });
 const controlService = createTaskControlService({
   taskService,
   hmrWaitMs: 100,
+  openComparisonBrowser: (context) => comparisonBrowser.open(context),
   project: {
     id: projectId,
     repoRoot,
@@ -152,6 +160,7 @@ const close = async () => {
   closing = true;
   await gateway.close();
   await controlService.close?.();
+  await comparisonBrowser.close();
   await new Promise<void>((resolve, reject) => {
     upstream.close((error) => (error ? reject(error) : resolve()));
   });

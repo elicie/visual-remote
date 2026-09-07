@@ -25,8 +25,7 @@ import type {
   TargetContext,
   TaskStatus,
 } from "@visual-remote/protocol";
-import { normalizeComparisonRequest, type ComparisonCaptureRequest, type ComparisonRequest } from "@visual-remote/protocol";
-import { captureComparison, comparisonSharingReady, observeComparisonSharing, startComparisonSharing, stopComparisonSharing } from "./comparison-capture.js";
+import { normalizeComparisonRequest, type ComparisonRequest } from "@visual-remote/protocol";
 import {
   BridgeConnection,
   changedFilesFromEvent,
@@ -40,6 +39,7 @@ import {
   getBrowserSessionId,
   logFromEvent,
   phaseFromEvent,
+  openComparisonBrowser,
   postTaskAction,
   routeTaskEvent,
   taskFromEvent,
@@ -239,8 +239,8 @@ function RequestStrip({
   onRequestText,
   onScope,
   onSubmit,
-  comparisonEnabled, comparisonUrl, comparisonError, sharingReady, sharingMessage, sharingBusy,
-  onComparisonEnabled, onComparisonUrl, onSharing,
+  comparisonEnabled, comparisonUrl, comparisonError, browserMessage, browserError, browserBusy,
+  onComparisonEnabled, onComparisonUrl, onOpenBrowser,
 }: {
   panelRef: preact.RefObject<HTMLDivElement>;
   position: PopoverPosition;
@@ -256,12 +256,12 @@ function RequestStrip({
   comparisonEnabled: boolean;
   comparisonUrl: string;
   comparisonError: string;
-  sharingReady: boolean;
-  sharingMessage: string;
-  sharingBusy: boolean;
+  browserMessage: string;
+  browserError: string;
+  browserBusy: boolean;
   onComparisonEnabled: (enabled: boolean) => void;
   onComparisonUrl: (url: string) => void;
-  onSharing: () => void;
+  onOpenBrowser: () => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const first = selection[0];
@@ -354,8 +354,10 @@ function RequestStrip({
               <input class="comparison-url" type="url" value={comparisonUrl} placeholder="https://www.figma.com/design/…?node-id=1-2" onInput={(event) => onComparisonUrl(event.currentTarget.value)} />
             </label>
             <p class="input-note">기본 기준: 전체·각 영역 99% 이상, 구조·누락 오류 0 · 최대 4회</p>
-            <button type="button" disabled={sharingBusy} onClick={onSharing}>{sharingBusy ? "탭 선택 대기 중…" : sharingReady ? "탭 공유 중지" : "현재 탭 공유"}</button>
-            <p class="input-note" role="status">{sharingMessage || "Chrome 공유 창에서 현재 탭을 선택하세요. 비교 시에만 화면을 캡처합니다."}</p>
+            <button type="button" disabled={browserBusy} aria-busy={browserBusy} onClick={onOpenBrowser}>{browserBusy ? "검증 브라우저 여는 중…" : "검증 브라우저 열기"}</button>
+            <p class="input-note">별도 검증 브라우저에서 한 번 로그인하세요. 현재 탭은 그대로 유지되며, 비교 요청은 순서대로 처리됩니다.</p>
+            {browserMessage ? <p class="input-note" role="status">{browserMessage}</p> : null}
+            {browserError ? <p class="error-banner" role="alert">{browserError}</p> : null}
             {comparisonError ? <p class="error-banner" role="alert">{comparisonError}</p> : null}
           </> : null}
         </div>
@@ -381,7 +383,7 @@ function RequestStrip({
               !requestText.trim() ||
               pendingCount > 0 ||
               connectionState !== "connected"
-              || (comparisonEnabled && (!sharingReady || Boolean(comparisonError)))
+              || (comparisonEnabled && Boolean(comparisonError))
             }
             onClick={onSubmit}
           >
@@ -741,9 +743,6 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
   const pendingActionRef = useRef<{ taskId: string } | null>(null);
   const mountedRef = useRef(true);
   const lastContextBundleRef = useRef<ContextBundle | null>(null);
-  const comparisonContextsRef = useRef(new Map<string, ContextBundle>());
-  const pendingComparisonRef = useRef<ContextBundle | null>(null);
-  const captureRequestsRef = useRef(new Set<string>());
   const dragStartRef = useRef<Point | null>(null);
   const compositionRef = useRef(false);
   const renderRevisionRef = useRef(1);
@@ -761,9 +760,9 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
   const [scope, setScope] = useState<RequestScope>("instance");
   const [comparisonChoice, setComparisonChoice] = useState<boolean | undefined>(undefined);
   const [comparisonUrl, setComparisonUrl] = useState("");
-  const [sharingReady, setSharingReady] = useState(false);
-  const [sharingMessage, setSharingMessage] = useState("");
-  const [sharingBusy, setSharingBusy] = useState(false);
+  const [browserMessage, setBrowserMessage] = useState("");
+  const [browserError, setBrowserError] = useState("");
+  const [browserBusy, setBrowserBusy] = useState(false);
   const detectedComparisonUrl = requestText.match(/https:\/\/(?:www\.)?figma\.com\/(?:design|file)\/[^\s<>"']+/i)?.[0]?.replace(/[),.;]+$/, "") ?? "";
   const comparisonEnabled = comparisonChoice ?? Boolean(detectedComparisonUrl);
   let comparisonRequest: ComparisonRequest | undefined;
@@ -771,16 +770,19 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
   try { comparisonRequest = normalizeComparisonRequest(requestText, comparisonChoice === false ? { enabled: false } : comparisonEnabled ? { enabled: true, url: comparisonUrl || detectedComparisonUrl } : undefined); }
   catch (error) { comparisonError = error instanceof Error ? error.message : "Figma 프레임 링크를 확인하세요."; }
 
-  useEffect(() => {
-    observeComparisonSharing((ready, message) => { setSharingReady(ready); setSharingMessage(message); });
-    return () => { observeComparisonSharing(undefined); stopComparisonSharing(); };
-  }, []);
-  const toggleSharing = async () => {
-    if (comparisonSharingReady()) { stopComparisonSharing(); return; }
-    setSharingBusy(true);
-    try { await startComparisonSharing(); }
-    catch (error) { setSharingMessage(error instanceof DOMException && error.name === "NotAllowedError" ? "탭 공유가 취소되었거나 허용되지 않았습니다. 다시 공유하거나 비교를 끄고 일반 요청을 보내세요." : error instanceof Error ? error.message : "탭 공유를 시작하지 못했습니다."); }
-    finally { setSharingBusy(false); }
+  const openBrowser = async () => {
+    if (browserBusy) return;
+    setBrowserBusy(true);
+    setBrowserMessage("");
+    setBrowserError("");
+    try {
+      const result = await openComparisonBrowser(token, { authMode });
+      if (mountedRef.current) setBrowserMessage(result.message);
+    } catch (error) {
+      if (mountedRef.current) setBrowserError(error instanceof Error ? error.message : "검증 브라우저를 열지 못했습니다. 다시 시도하세요.");
+    } finally {
+      if (mountedRef.current) setBrowserBusy(false);
+    }
   };
   const [renderRevision, setRenderRevision] = useState(1);
   const [geometryRevision, setGeometryRevision] = useState(0);
@@ -1006,27 +1008,6 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
       },
       onEvent: (event) => {
         if (!active) return;
-        const record = taskFromEvent(event);
-        if (event.type === "task.queued" && record?.originBrowserSessionId === browserSessionId && pendingComparisonRef.current) {
-          comparisonContextsRef.current.set(record.id, pendingComparisonRef.current);
-          pendingComparisonRef.current = null;
-        }
-        // Capture is a control-plane request, never gated by active-task selection or hydration.
-        if (event.type === "comparison.capture_requested") {
-          const request = event.payload as ComparisonCaptureRequest;
-          if (request.browserSessionId !== browserSessionId || event.taskId !== request.taskId || captureRequestsRef.current.has(request.requestId)) return;
-          captureRequestsRef.current.add(request.requestId);
-          const context = comparisonContextsRef.current.get(request.taskId);
-          const result = context ? captureComparison(request, context, host) : Promise.resolve({ requestId: request.requestId, taskId: request.taskId, error: "이 탭에 비교 요청 컨텍스트가 없습니다. 현재 화면에서 새 비교를 요청하세요." });
-          void result.then((payload) => {
-            const error = !bridge.send("comparison.capture_result", payload) ? "Bridge 연결이 끊겨 캡처를 전송하지 못했습니다. 재연결 후 새 비교를 요청하세요." : payload.error;
-            if (error) {
-              setSharingMessage(error);
-              setTask((current) => current?.id === request.taskId ? { ...current, error } : current);
-            }
-          });
-          return;
-        }
         if (hydrating) {
           bufferedEvents.push(event);
         } else {
@@ -1589,10 +1570,7 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
     if (!trimmed || connection.state !== "connected") {
       return;
     }
-    if (comparisonError || (comparisonEnabled && !comparisonSharingReady())) {
-      setSharingMessage(comparisonError || "현재 탭을 먼저 공유하세요.");
-      return;
-    }
+    if (comparisonError) return;
 
     let contexts = await Promise.all(
       selectedRef.current.map(async (item, index) =>
@@ -1620,7 +1598,6 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
       renderRevision,
     });
     if (comparisonRequest) bundle.request.comparison = comparisonRequest;
-    pendingComparisonRef.current = comparisonRequest?.enabled ? bundle : null;
     lastContextBundleRef.current = bundle;
     const sent = connectionRef.current?.send(
       "task.create",
@@ -1649,7 +1626,6 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
     setTaskPanelHidden(false);
     setRequestOpen(false);
   }, [
-    comparisonEnabled,
     comparisonError,
     comparisonRequest,
     browserSessionId,
@@ -1759,9 +1735,7 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
         ...(task.comparison.threshold !== undefined ? { threshold: task.comparison.threshold } : {}),
       } : undefined);
       const comparison = detected ?? (inherited ? normalizeComparisonRequest(followUpText, inherited) : undefined);
-      if (comparison?.enabled && !comparisonSharingReady()) throw new Error("Figma 비교는 현재 탭 공유가 필요합니다. 새 요청에서 현재 탭을 공유하세요.");
       if (comparison) contextBundle.request.comparison = comparison;
-      pendingComparisonRef.current = comparison?.enabled ? contextBundle : null;
     } catch (error) {
       setTask((current) => current ? { ...current, error: error instanceof Error ? error.message : "Figma 링크를 확인하세요." } : current);
       return;
@@ -1969,12 +1943,12 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
           comparisonEnabled={comparisonEnabled}
           comparisonUrl={comparisonUrl || detectedComparisonUrl}
           comparisonError={comparisonError}
-          sharingReady={sharingReady}
-          sharingMessage={sharingMessage}
-          sharingBusy={sharingBusy}
-          onComparisonEnabled={(enabled) => { setComparisonChoice(enabled); if (!enabled) stopComparisonSharing(); }}
+          browserMessage={browserMessage}
+          browserError={browserError}
+          browserBusy={browserBusy}
+          onComparisonEnabled={setComparisonChoice}
           onComparisonUrl={setComparisonUrl}
-          onSharing={() => void toggleSharing()}
+          onOpenBrowser={() => void openBrowser()}
           composingRef={compositionRef}
           onRequestText={setRequestText}
           onScope={setScope}

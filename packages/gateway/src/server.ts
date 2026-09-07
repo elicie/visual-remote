@@ -277,6 +277,9 @@ function parseApiRoute(method: string, path: string): ApiRoute | undefined {
   if (method === "GET" && path === "/_visual/api/project") {
     return { operation: "project" };
   }
+  if (method === "POST" && path === "/_visual/api/comparison-browser") {
+    return { operation: "openComparisonBrowser" };
+  }
   if (path === "/_visual/api/tasks") {
     if (method === "GET") {
       return { operation: "listTasks" };
@@ -347,6 +350,9 @@ async function invokeApiRoute(
 
   if (route.operation === "createTask") {
     return await service.createTask?.(await readJsonBody(request));
+  }
+  if (route.operation === "openComparisonBrowser") {
+    return await service.openComparisonBrowser?.(await readJsonBody(request));
   }
   if (route.operation === "listTasks") {
     return await service.listTasks?.(parseTaskListRequest(request));
@@ -616,7 +622,7 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
   const injectOverlay = options.injectOverlay ?? true;
   const controlWebSocketServer = new WebSocketServer({
     noServer: true,
-    maxPayload: 24 * 1024 * 1024,
+    maxPayload: 1024 * 1024,
   });
   const controlSockets = new Set<WebSocket>();
   const proxy = httpProxy.createProxyServer({
