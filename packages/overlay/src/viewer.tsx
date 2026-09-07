@@ -33,6 +33,9 @@ type TaskFilter = "all" | "active" | "review" | "issue";
 const TASK_PAGE_SIZE = 100;
 const TASK_FETCH_SIZE = TASK_PAGE_SIZE + 1;
 const DIFF_PREVIEW_CHARACTERS = 60_000;
+const LOG_PAGE_SIZE = 40;
+const LOG_PREVIEW_CHARACTERS = 600;
+const LOG_PREVIEW_LINES = 6;
 
 interface DetailState extends TaskArtifacts {
   taskId: string;
@@ -197,6 +200,51 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+function LogEntry({ text, index }: { text: string; index: number }) {
+  const [expanded, setExpanded] = useState(false);
+  const preview = text.slice(0, LOG_PREVIEW_CHARACTERS).split("\n").slice(0, LOG_PREVIEW_LINES).join("\n");
+  const isLong = preview.length < text.length;
+  const contentId = `log-content-${index}`;
+  return (
+    <li>
+      <span class="machine">{String(index + 1).padStart(2, "0")}</span>
+      <div class="log-entry">
+        <pre id={contentId}>{isLong && !expanded ? `${preview}\n…` : text}</pre>
+        {isLong ? (
+          <button
+            type="button"
+            class="log-toggle"
+            aria-expanded={expanded ? "true" : "false"}
+            aria-controls={contentId}
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? "로그 접기" : "전체 로그 펼치기"}
+          </button>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
+function LogList({ logs }: { logs: string[] }) {
+  const [visibleCount, setVisibleCount] = useState(LOG_PAGE_SIZE);
+  const start = Math.max(0, logs.length - visibleCount);
+  return (
+    <>
+      {start > 0 ? (
+        <button type="button" class="log-older" onClick={() => setVisibleCount((count) => count + LOG_PAGE_SIZE)}>
+          이전 로그 {Math.min(start, LOG_PAGE_SIZE)}개 더 보기 · {start}개 남음
+        </button>
+      ) : null}
+      <ol tabIndex={0} aria-label="작업 로그 목록" start={start + 1}>
+        {logs.slice(start).map((log, offset) => (
+          <LogEntry key={start + offset} text={log} index={start + offset} />
+        ))}
+      </ol>
+    </>
+  );
+}
+
 function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
   const { authMode } = bootstrap;
   const token = useMemo(() => authMode === "token" ? consumeViewerToken() ?? "" : "", [authMode]);
@@ -264,7 +312,7 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
             },
       );
       try {
-        const artifacts = await fetchTaskArtifacts(token, task.id, controller.signal, requestOptions);
+        const artifacts = await fetchTaskArtifacts(token, task.id, controller.signal, { ...requestOptions, logFormat: "full" });
         setDetail((current) =>
           current?.taskId === task.id && !controller.signal.aborted
             ? { taskId: task.id, loading: false, ...artifacts }
@@ -306,7 +354,7 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
       const taskId = event.taskId ?? eventTask?.id;
       if (!taskId || selectedIdRef.current !== taskId) return;
 
-      const log = logFromEvent(event);
+      const log = logFromEvent(event, "full");
       const files = changedFilesFromEvent(event);
       if (log || files.length > 0) {
         setDetail((current) =>
@@ -315,7 +363,7 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
                 ...current,
                 changedFiles:
                   files.length > 0 ? files : current.changedFiles,
-                logs: log ? [...current.logs, log].slice(-40) : current.logs,
+                logs: log ? [...current.logs, log] : current.logs,
               }
             : current,
         );
@@ -793,11 +841,7 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
                       {selectedDetail?.loading ? (
                         <p class="block-state">상세 내역을 불러오는 중입니다.</p>
                       ) : selectedDetail && selectedDetail.logs.length > 0 ? (
-                        <ol tabIndex={0} aria-label="작업 로그 목록">
-                          {selectedDetail.logs.map((log, index) => (
-                            <li key={`${index}-${log}`}><span class="machine">{String(index + 1).padStart(2, "0")}</span>{log}</li>
-                          ))}
-                        </ol>
+                        <LogList key={selectedDetail.taskId} logs={selectedDetail.logs} />
                       ) : selectedDetail?.unavailable.includes("logs") ? null : (
                         <p class="block-state">저장된 작업 로그가 없습니다.</p>
                       )}

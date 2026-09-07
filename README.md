@@ -187,10 +187,14 @@ paths:
 effort는 `low`, `medium`, `high`, `xhigh`, `max`를 지원합니다. 값을 생략하면 선택한
 CLI의 현재 기본 설정을 사용합니다.
 
-Claude를 사용하려면 `adapter: claude`로 변경합니다. Visual Remote는 Claude를
-`acceptEdits` 권한으로 실행하고 사용자 MCP를 로드하지 않습니다. Linux에서 Bash
-sandbox까지 사용하려면 `bwrap`과 `socat`이 모두 필요하며 `visual doctor`가 설치
-상태를 표시합니다.
+Claude를 사용하려면 `adapter: claude`로 변경합니다. Visual Remote는 workspace에서
+비대화형 stream JSON 모드로 실행하며, 설치된 Claude의 사용자·프로젝트 MCP, 권한,
+브라우저, sandbox·네트워크 설정을 별도 CLI 정책으로 덮어쓰지 않습니다. 권한 우회
+플래그도 추가하지 않습니다. `HOME` 및 설정 위치를 지정하는 `CLAUDE_CONFIG_DIR`를
+전달하며, 도구 사용 가능 여부와 비대화형 권한 승인은 기존 Claude 설정을 따릅니다.
+`visual doctor`는 Bridge가 sandbox를 강제한다는 전제로 `bwrap`·`socat`을 요구하지 않습니다.
+Figma 등 외부 디자인은 설정된 도구로 실제 접근·확인한 경우에만 검증했다고 보고해야
+하며, 접근할 수 없다면 그 한계를 명시하고 저장소 문서를 디자인 일치 검증으로 대체하지 않습니다.
 
 Codex의 OpenAI-compatible provider는 사용자 Codex profile에 정의하고
 `agent.profile`로 선택합니다. provider는 Responses API streaming을 지원해야 합니다.
@@ -210,6 +214,9 @@ API key 값은 YAML에 기록하지 않습니다. `agent.inheritEnv`에는 부�
 Codex 또는 Claude로 전달할 환경변수 이름만 작성하며, 누락된 변수는 `visual doctor`가
 실패로 보고합니다. 개인별 선택은 Git에서 제외되는
 `.visualdev/config.local.yaml`에 둘 수 있습니다.
+Claude 인증 변수 `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`은 기존처럼 전달합니다.
+그 외 MCP 서버 등이 요구하는 환경변수는 `agent.inheritEnv`에 이름을 명시해야 합니다.
+부모 프로세스의 모든 환경변수나 비밀값을 일괄 상속하지 않습니다.
 
 `project.workspace`, `paths.allowed`, `paths.denied`는 설정 파일이 가리키는 앱 workspace
 기준입니다. 모노레포의 `apps/web`에서 `init`했다면 `src/**`는
@@ -265,6 +272,9 @@ API가 원래 앱 Origin만 허용한다면 개발 서버 프록시 또는 원�
 만료되면 Overlay의 `작업 보드 ↗`에서 다시 엽니다. 연결이 끊겼을 때는 헤더의 STREAM 상태를 확인하고 수동
 `새로고침`을 복구 수단으로 사용할 수 있습니다. 요청 문구, Task ID와 변경 파일을
 검색할 수 있고, `이전 작업 더 보기`로 100개씩 과거 기록을 불러옵니다.
+작업 로그는 원문의 줄바꿈과 전체 내용을 보존합니다. 긴 메시지는 `전체 로그 펼치기`로
+확인하고, 처음 표시되는 최근 40개보다 이전 기록은 `이전 로그 더 보기`로 확인할 수 있습니다.
+Overlay의 작은 진행 패널은 요약 표시를 유지하므로, 상세 출력은 작업 보드에서 확인합니다.
 
 `변경 유지`는 현재 작업 트리의 변경을 그대로 두는 동작입니다. Git 커밋이나
 푸시는 자동으로 수행하지 않습니다.

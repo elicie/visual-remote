@@ -290,6 +290,15 @@ describe("task log summaries", () => {
     createdAt: "2026-08-03T00:00:00.000Z",
   });
 
+  it("preserves full multiline live output while keeping overlay summaries compact", () => {
+    const message = `  Claude output\n${"long text ".repeat(100)}\n  final line\n`;
+    const output = event({ event: { type: "message", message } });
+    expect(logFromEvent(output, "full")).toBe(message);
+    expect(logFromEvent(output)).toBe(compactText(message, 500));
+    const summary = event({ event: { type: "tool_start", name: "Read", summary: message } });
+    expect(logFromEvent(summary, "full")).toBe(`도구 시작 · Read · ${message}`);
+  });
+
   it("shows the effective RTK command and cwd without shell-wrapper noise", () => {
     expect(
       logFromEvent(
@@ -468,6 +477,24 @@ describe("task history", () => {
       logs: [],
       unavailable: ["files", "logs"],
     });
+  });
+
+  it("loads all persisted viewer logs without clipping multiline or repeated entries", async () => {
+    const message = `  persisted\n${"full output ".repeat(100)}\n  final line\n`;
+    const messages = [message, ...Array.from({ length: 45 }, (_, index) => `entry ${index}`), message, message];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith("/logs")) {
+        return new Response(JSON.stringify({ logs: messages.map((text, index) => ({
+          id: `log-${index}`, event: { type: "message", message: text },
+        })) }));
+      }
+      return new Response(JSON.stringify(path.endsWith("/diff") ? { diff: "" } : []));
+    }));
+    const full = await fetchTaskArtifacts("fixture-token", "task-1", undefined, { logFormat: "full" });
+    expect(full.logs).toEqual(messages);
+    const compact = await fetchTaskArtifacts("fixture-token", "task-1");
+    expect(compact.logs).toEqual(messages.slice(-40).map((text) => compactText(text, 500)));
   });
 
   it("cancels superseded artifact requests", async () => {

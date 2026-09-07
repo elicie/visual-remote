@@ -123,8 +123,6 @@ describe("visual doctor", () => {
     expect(checks.find(({ name }) => name === "agent-environment")).toMatchObject({
       status: "pass",
     });
-    expect(checks.find(({ name }) => name === "claude-sandbox")).toMatchObject({
-      status: "warning",
-    });
+    expect(checks.find(({ name }) => name === "claude-sandbox")).toBeUndefined();
   });
 });

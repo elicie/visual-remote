@@ -43,6 +43,7 @@ const INHERITED_ENVIRONMENT = [
   "XDG_STATE_HOME",
   "ANTHROPIC_API_KEY",
   "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CONFIG_DIR",
   "HTTPS_PROXY",
   "HTTP_PROXY",
   "NO_PROXY",
@@ -53,28 +54,6 @@ const INHERITED_ENVIRONMENT = [
   "COMSPEC",
   "PATHEXT",
 ] as const;
-
-const EMPTY_MCP_CONFIG = JSON.stringify({ mcpServers: {} });
-const CLAUDE_SETTINGS = JSON.stringify({
-  permissions: {
-    disableBypassPermissionsMode: "disable",
-    deny: [
-      "Read(./.env)",
-      "Read(./.env.*)",
-      "Read(./**/*.pem)",
-      "Read(./**/*.key)",
-      "Edit(./.git/**)",
-      "Edit(./.visualdev/runtime/**)",
-      "Edit(./node_modules/**)",
-    ],
-  },
-  sandbox: {
-    enabled: true,
-    autoAllowBashIfSandboxed: true,
-    allowUnsandboxedCommands: false,
-    network: { strictAllowlist: true },
-  },
-});
 
 function processEnv(overrides: Record<string, string>): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
@@ -147,16 +126,6 @@ export class ClaudeAdapter implements AgentAdapter {
       "--output-format",
       "stream-json",
       "--verbose",
-      "--permission-mode",
-      "acceptEdits",
-      "--strict-mcp-config",
-      "--mcp-config",
-      EMPTY_MCP_CONFIG,
-      "--no-chrome",
-      "--tools",
-      "Read,Glob,Grep,Edit,Write,Bash",
-      "--settings",
-      CLAUDE_SETTINGS,
       ...(this.#model === undefined ? [] : ["--model", this.#model]),
       ...(this.#reasoningEffort === undefined
         ? []

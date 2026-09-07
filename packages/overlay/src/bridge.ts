@@ -582,15 +582,14 @@ function commandLogLine(event: Record<string, unknown>): string | null {
     event.timedOut === true ? "시간 초과" : undefined,
     event.truncated === true ? "출력 축약" : undefined,
   ].filter((value): value is string => Boolean(value));
-  return compactText(
-    `${runtime} · ${command}${metadata.length > 0 ? ` · ${metadata.join(" · ")}` : ""}`,
-    500,
-  );
+  return `${runtime} · ${command}${metadata.length > 0 ? ` · ${metadata.join(" · ")}` : ""}`;
 }
 
-function logLineFromValue(value: unknown): string | null {
+type LogFormat = "compact" | "full";
+
+function logTextFromValue(value: unknown): string | null {
   if (typeof value === "string") {
-    return compactText(value, 500);
+    return value;
   }
   const record = recordOf(value);
   if (!record) {
@@ -603,39 +602,30 @@ function logLineFromValue(value: unknown): string | null {
   }
   if (type === "tool_start" && typeof event.name === "string") {
     if (event.name === "command_execution" || event.name === "direct_exec") return null;
-    return compactText(
-      `도구 시작 · ${event.name}${
-        typeof event.summary === "string" ? ` · ${event.summary}` : ""
-      }`,
-      500,
-    );
+    return `도구 시작 · ${event.name}${
+      typeof event.summary === "string" ? ` · ${event.summary}` : ""
+    }`;
   }
   if (type === "tool_end" && typeof event.name === "string") {
     if (event.name === "command_execution" || event.name === "direct_exec") return null;
-    return compactText(
-      `도구 ${event.ok === false ? "실패" : "완료"} · ${event.name}`,
-      500,
-    );
+    return `도구 ${event.ok === false ? "실패" : "완료"} · ${event.name}`;
   }
   if (type === "phase" && typeof event.name === "string") {
-    return compactText(`단계 · ${event.name}`, 500);
+    return `단계 · ${event.name}`;
   }
   if (type === "file_hint" && typeof event.path === "string") {
-    return compactText(`파일 · ${event.path}`, 500);
+    return `파일 · ${event.path}`;
   }
   if (
     type === "usage"
     && typeof event.inputTokens === "number"
     && typeof event.outputTokens === "number"
   ) {
-    return compactText(
-      `토큰 · 입력 ${event.inputTokens.toLocaleString("en-US")}${
-        typeof event.cachedInputTokens === "number"
-          ? ` · 캐시 ${event.cachedInputTokens.toLocaleString("en-US")}`
-          : ""
-      } · 출력 ${event.outputTokens.toLocaleString("en-US")}`,
-      500,
-    );
+    return `토큰 · 입력 ${event.inputTokens.toLocaleString("en-US")}${
+      typeof event.cachedInputTokens === "number"
+        ? ` · 캐시 ${event.cachedInputTokens.toLocaleString("en-US")}`
+        : ""
+    } · 출력 ${event.outputTokens.toLocaleString("en-US")}`;
   }
   const message =
     event.message ??
@@ -644,14 +634,19 @@ function logLineFromValue(value: unknown): string | null {
     event.command ??
     event.error ??
     record.message;
-  return typeof message === "string" ? compactText(message, 500) : null;
+  return typeof message === "string" ? message : null;
+}
+
+function logLineFromValue(value: unknown, format: LogFormat): string | null {
+  const text = logTextFromValue(value);
+  return text === null || format === "full" ? text : compactText(text, 500);
 }
 
 export async function fetchTaskArtifacts(
   token: string,
   taskId: string,
   signal?: AbortSignal,
-  options: BridgeRequestOptions = {},
+  options: BridgeRequestOptions & { logFormat?: LogFormat } = {},
 ): Promise<TaskArtifacts> {
   const base = `/_visual/api/tasks/${encodeURIComponent(taskId)}`;
   const requestInit = signal === undefined ? undefined : { signal };
@@ -679,12 +674,10 @@ export async function fetchTaskArtifacts(
     : Array.isArray(logsRecord?.logs)
       ? logsRecord.logs
       : [];
-  const logs = Array.isArray(logEntries)
-    ? logEntries
-        .map(logLineFromValue)
-        .filter((line): line is string => Boolean(line))
-        .slice(-40)
-    : [];
+  const formattedLogs = logEntries
+    .map((entry) => logLineFromValue(entry, options.logFormat ?? "compact"))
+    .filter((line): line is string => line !== null && line.length > 0);
+  const logs = options.logFormat === "full" ? formattedLogs : formattedLogs.slice(-40);
 
   const unavailable: TaskArtifacts["unavailable"] = [];
   if (filesResult.status === "rejected") unavailable.push("files");
@@ -752,9 +745,9 @@ export function phaseFromEvent(event: ServerEvent): TaskStatus | undefined {
   return typeof phase === "string" ? (phase as TaskStatus) : undefined;
 }
 
-export function logFromEvent(event: ServerEvent): string | null {
+export function logFromEvent(event: ServerEvent, format: LogFormat = "compact"): string | null {
   const payload = recordOf(event.payload);
-  return logLineFromValue(payload?.event ?? payload);
+  return logLineFromValue(payload?.event ?? payload, format);
 }
 
 export function changedFilesFromEvent(event: ServerEvent): string[] {

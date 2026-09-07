@@ -1,7 +1,7 @@
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ClaudeAdapter,
@@ -16,7 +16,13 @@ async function executable(directory: string): Promise<string> {
     `#!/usr/bin/env node
 let body = "";
 for await (const chunk of process.stdin) body += chunk;
-const payload = JSON.stringify({args:process.argv.slice(2),body});
+const payload = JSON.stringify({
+  args: process.argv.slice(2), body, cwd: process.cwd(),
+  environment: Object.fromEntries([
+    "HOME", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+    "HTTPS_PROXY", "VISUAL_MCP_TOKEN", "VISUAL_UNRELATED_SECRET"
+  ].filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]))
+});
 console.log(JSON.stringify({type:"system",subtype:"init",session_id:"claude-session"}));
 console.log(JSON.stringify({
   type:"assistant",
@@ -48,14 +54,29 @@ function input(root: string): AgentRunInput {
   };
 }
 
-function invocation(events: NormalizedAgentEvent[]): { args: string[]; body: string } {
+interface Invocation {
+  args: string[];
+  body: string;
+  cwd: string;
+  environment: Record<string, string>;
+}
+
+function invocation(events: NormalizedAgentEvent[]): Invocation {
   const message = events.find((event) => event.type === "message");
   if (message?.type !== "message") throw new Error("Missing Claude invocation");
-  return JSON.parse(message.text) as { args: string[]; body: string };
+  return JSON.parse(message.text) as Invocation;
 }
 
 describe("ClaudeAdapter", () => {
-  it("uses stream JSON with bounded permissions for new and resumed runs", async () => {
+  beforeEach(() => {
+    for (const name of [
+      "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+      "HTTPS_PROXY", "VISUAL_MCP_TOKEN", "VISUAL_UNRELATED_SECRET",
+    ]) vi.stubEnv(name, undefined);
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("preserves Claude configuration and permissions for new and resumed stream runs", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "visual-claude-test-"));
     try {
       const adapter = new ClaudeAdapter({
@@ -74,21 +95,11 @@ describe("ClaudeAdapter", () => {
       }
       const run = invocation(runEvents);
       expect(run.body).toBe("edit the requested UI");
-      expect(run.args).toContain("--strict-mcp-config");
-      expect(run.args).toContain("--no-chrome");
-      expect(run.args).toContain("acceptEdits");
-      expect(run.args).toContain("sonnet");
-      expect(run.args).toContain("high");
-      expect(run.args).not.toContain("--dangerously-skip-permissions");
-      const settingsIndex = run.args.indexOf("--settings");
-      expect(settingsIndex).toBeGreaterThanOrEqual(0);
-      expect(JSON.parse(run.args[settingsIndex + 1] ?? "{}")).toMatchObject({
-        permissions: { disableBypassPermissionsMode: "disable" },
-        sandbox: {
-          enabled: true,
-          allowUnsandboxedCommands: false,
-        },
-      });
+      expect(run.cwd).toBe(directory);
+      expect(run.args).toEqual([
+        "-p", "--output-format", "stream-json", "--verbose",
+        "--model", "sonnet", "--effort", "high",
+      ]);
 
       const resumeEvents: NormalizedAgentEvent[] = [];
       for await (const event of adapter.resume(
@@ -98,9 +109,51 @@ describe("ClaudeAdapter", () => {
         resumeEvents.push(event);
       }
       const resumed = invocation(resumeEvents);
-      expect(resumed.args).toContain("--resume");
-      expect(resumed.args[resumed.args.indexOf("--resume") + 1]).toBe("claude-session");
+      expect(resumed.args).toEqual([...run.args, "--resume", "claude-session"]);
       expect(resumed.body).toBe("edit the requested UI");
+    } finally {
+      await rm(directory, { recursive: true });
+    }
+  });
+
+  it("inherits config, authentication and proxy settings without copying unrelated secrets", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "visual-claude-env-test-"));
+    vi.stubEnv("HOME", directory);
+    vi.stubEnv("CLAUDE_CONFIG_DIR", resolve(directory, "custom-config"));
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-token");
+    vi.stubEnv("HTTPS_PROXY", "http://proxy.example.test:8080");
+    vi.stubEnv("VISUAL_MCP_TOKEN", "parent-mcp-token");
+    vi.stubEnv("VISUAL_UNRELATED_SECRET", "must-not-be-inherited");
+    try {
+      const adapter = new ClaudeAdapter({
+        executable: await executable(directory),
+        rtkExecutable: false,
+      });
+      const environments: Record<string, string>[] = [
+        {},
+        { VISUAL_MCP_TOKEN: "explicit-mcp-token" },
+      ];
+      for (const environment of environments) {
+        const events: NormalizedAgentEvent[] = [];
+        for await (const event of adapter.run(
+          { ...input(directory), environment },
+          new AbortController().signal,
+        )) {
+          events.push(event);
+        }
+        const run = invocation(events);
+        expect(run.args).toEqual(["-p", "--output-format", "stream-json", "--verbose"]);
+        expect(run.environment).toEqual({
+          HOME: directory,
+          CLAUDE_CONFIG_DIR: resolve(directory, "custom-config"),
+          ANTHROPIC_API_KEY: "test-anthropic-key",
+          CLAUDE_CODE_OAUTH_TOKEN: "test-oauth-token",
+          HTTPS_PROXY: "http://proxy.example.test:8080",
+          ...environment,
+        });
+        expect(run.body).toBe(input(directory).prompt);
+      }
     } finally {
       await rm(directory, { recursive: true });
     }

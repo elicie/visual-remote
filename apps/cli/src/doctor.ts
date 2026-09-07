@@ -180,30 +180,6 @@ export async function runDoctor(
       });
     }
 
-    if (adapter === "claude") {
-      const sandboxDependencies = await Promise.all(
-        ["bwrap", "socat"].map(async (executable) => ({
-          executable,
-          available: await executableAvailable(
-            executable,
-            loaded.workspaceRoot,
-            environment,
-          ),
-        })),
-      );
-      const missing = sandboxDependencies
-        .filter(({ available }) => !available)
-        .map(({ executable }) => executable);
-      checks.push({
-        name: "claude-sandbox",
-        status: missing.length === 0 ? "pass" : "warning",
-        message:
-          missing.length === 0
-            ? "Claude Bash sandbox dependencies are available."
-            : `Claude Bash sandbox is unavailable without: ${missing.join(", ")}.`,
-      });
-    }
-
     const rtkAvailable = await executableAvailable(
       "rtk",
       loaded.workspaceRoot,

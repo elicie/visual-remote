@@ -803,16 +803,48 @@ export const viewerStyles = String.raw`
 
   .logs-block li {
     display: grid;
-    grid-template-columns: 22px minmax(0, 1fr);
+    grid-template-columns: minmax(22px, max-content) minmax(0, 1fr);
     gap: 6px;
     padding: 4px 0;
     color: #454640;
     font-size: 11px;
   }
 
-  .logs-block li span {
+  .logs-block li > span {
     color: var(--dispatch-dark);
     font-size: 9px;
+  }
+
+  .log-entry pre {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+
+  .log-toggle,
+  .log-older {
+    min-height: 30px;
+    padding: 4px 8px;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--strip-strong);
+    color: var(--ink);
+    cursor: pointer;
+    font-size: 11px;
+  }
+
+  .log-toggle {
+    margin-top: 5px;
+  }
+
+  .log-older {
+    margin: 8px 9px 0;
+  }
+
+  .log-toggle:hover,
+  .log-older:hover {
+    background: var(--strip);
   }
 
   .diff-block {

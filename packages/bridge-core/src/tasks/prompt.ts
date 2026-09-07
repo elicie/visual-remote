@@ -83,7 +83,7 @@ ${options.contextBundlePath}
 
 Runtime capabilities:
 - Repository inspection, file editing, and short-lived repository checks are available.
-- Direct browser or Parlane MCP control is not exposed by this Bridge invocation unless the runtime explicitly lists such a tool.
+- Browser, MCP, and external-reference access depend on the selected CLI's configured tools and permissions; use only tools actually available in this run.
 - When a browser session is connected, the Bridge performs its configured HMR and browser checks after editing.
 
 Rules:
@@ -96,6 +96,8 @@ Rules:
 - Keep the change focused on the request.
 - Do not start another long-running development server solely for visual verification.
 - Run only useful checks for the files changed.
+- Before claiming a match to an external design reference (including Figma), actually access and inspect it with an available tool and report the evidence used. A URL in the request is not access evidence.
+- If the reference cannot be accessed, explicitly disclose that limitation and do not claim design verification. Repository documentation may guide implementation but is not evidence of a verified match to the external reference.
 - When finished, summarize changed files and any unresolved uncertainty.
 `;
 }

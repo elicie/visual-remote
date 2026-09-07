@@ -665,3 +665,66 @@ test("local bootstrap selects session.open before any token handshake", async ({
   expect(frames[0]).toEqual({ type: "session.open", payload: { mode: "control" } });
   expect(frames.some((frame) => frame.type === "auth")).toBe(false);
 });
+
+test("viewer preserves full persisted and live multiline logs with older entries and repeats", async ({ page }) => {
+  const task = overlayTask("full-viewer-logs", "logs-session", "running_agent");
+  const longMessage = `  Claude persisted output\n${"long multiline content ".repeat(80)}\n  PERSISTED END\n`;
+  const liveMessage = `  Claude live output\n${"live multiline content ".repeat(80)}\n  LIVE END\n`;
+  const persisted = [
+    "oldest persisted entry",
+    ...Array.from({ length: 42 }, (_, index) => `persisted entry ${index}`),
+    "repeated persisted entry",
+    "repeated persisted entry",
+    longMessage,
+  ];
+  const connected = deferred<WebSocketRoute>();
+  await page.route("**/_visual/bootstrap", (route) => route.fulfill({
+    json: { authMode: "local", projectId: "browser-fixture" },
+  }));
+  await page.route("**/_visual/api/project", (route) => route.fulfill({ json: { projectId: "browser-fixture" } }));
+  await page.route(/\/_visual\/api\/tasks(?:\?.*)?$/u, (route) => route.fulfill({ json: [task] }));
+  await page.route("**/_visual/api/tasks/*/files", (route) => route.fulfill({ json: [] }));
+  await page.route("**/_visual/api/tasks/*/diff", (route) => route.fulfill({ json: { diff: "" } }));
+  await page.route("**/_visual/api/tasks/*/logs", (route) => route.fulfill({
+    json: persisted.map((message, index) => ({ id: `log-${index}`, event: { type: "message", message } })),
+  }));
+  await page.routeWebSocket("**/_visual/ws", (socket) => {
+    socket.onMessage((raw) => {
+      const frame = JSON.parse(String(raw));
+      if (frame.type === "session.open") socket.send(JSON.stringify({
+        type: "session.ready", projectId: "browser-fixture", payload: { access: "viewer" },
+      }));
+      if (frame.type === "browser.hello") connected.resolve(socket);
+    });
+  });
+  await page.goto(`${fixture.origin}/_visual/viewer`);
+  const logs = page.getByRole("list", { name: "작업 로그 목록" });
+  await expect(logs.locator("li")).toHaveCount(40);
+  await expect(logs.getByText("oldest persisted entry", { exact: true })).toHaveCount(0);
+  await expect(logs.getByText("repeated persisted entry", { exact: true })).toHaveCount(2);
+  const persistedEntry = logs.locator("li").last();
+  await expect(persistedEntry.locator("pre")).not.toContainText("PERSISTED END");
+  await persistedEntry.getByRole("button", { name: "전체 로그 펼치기" }).click();
+  expect(await persistedEntry.locator("pre").textContent()).toBe(longMessage);
+  await expect(persistedEntry.locator("pre")).toHaveCSS("white-space", "pre-wrap");
+  await persistedEntry.getByRole("button", { name: "로그 접기" }).click();
+  await expect(persistedEntry.locator("pre")).not.toContainText("PERSISTED END");
+  await page.getByRole("button", { name: /이전 로그 .*더 보기/ }).click();
+  await expect(logs.locator("li")).toHaveCount(persisted.length);
+  await expect(logs.getByText("oldest persisted entry", { exact: true })).toBeVisible();
+  const socket = await connected.promise;
+  const live = [...Array.from({ length: 45 }, (_, index) => `live entry ${index}`), liveMessage, liveMessage];
+  for (const [index, message] of live.entries()) socket.send(JSON.stringify({
+    seq: index + 1, type: "task.agent_output", projectId: "browser-fixture", taskId: task.id,
+    payload: { event: { type: "message", message } }, createdAt: new Date().toISOString(),
+  }));
+  await expect(page.locator(".logs-block > header .machine")).toHaveText(String(persisted.length + live.length));
+  const liveEntries = logs.locator("li").filter({ hasText: "Claude live output" });
+  await expect(liveEntries).toHaveCount(2);
+  await liveEntries.last().getByRole("button", { name: "전체 로그 펼치기" }).click();
+  expect(await liveEntries.last().locator("pre").textContent()).toBe(liveMessage);
+  await page.getByRole("button", { name: /이전 로그 .*더 보기/ }).click();
+  await expect(logs.locator("li")).toHaveCount(persisted.length + live.length);
+  await expect(logs.getByText("oldest persisted entry", { exact: true })).toHaveCount(1);
+  await expect(logs.getByText("live entry 0", { exact: true })).toHaveCount(1);
+});

@@ -124,7 +124,11 @@ describe("TaskService", () => {
     expect(prompt).toContain("Local upstream URL: http://127.0.0.1:10010/");
     expect(prompt).toContain("already-resolved service directory");
     expect(prompt).toContain("Run project commands from the workspace");
-    expect(prompt).toContain("Direct browser or Parlane MCP control is not exposed");
+    expect(prompt).toContain("selected CLI's configured tools and permissions");
+    expect(prompt).toContain("actually access and inspect it with an available tool");
+    expect(prompt).toContain("A URL in the request is not access evidence");
+    expect(prompt).toContain("explicitly disclose that limitation and do not claim design verification");
+    expect(prompt).toContain("Repository documentation may guide implementation but is not evidence");
     expect(prompt).toContain("Bridge performs its configured HMR and browser checks");
     await service.close();
   });
