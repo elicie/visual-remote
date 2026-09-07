@@ -18,7 +18,14 @@ async function responseStatus(url: string): Promise<number> {
 }
 
 describe("Visual Remote Vite integration", () => {
-  it.each(["same plugin", "reloaded config"])("keeps the app and owned Bridge alive across restart with %s", async (mode) => {
+  it.each([
+    { mode: "same plugin", failure: "none" },
+    { mode: "reloaded config", failure: "none" },
+    { mode: "same plugin", failure: "close" },
+    { mode: "reloaded config", failure: "close" },
+    { mode: "same plugin", failure: "recover" },
+    { mode: "reloaded config", failure: "recover" },
+  ])("keeps the owned Bridge lifecycle correct with $mode and $failure restart failure", async ({ mode, failure }) => {
     const root = await mkdtemp(join(tmpdir(), "visual-vite-"));
     await execFileAsync("git", ["init", "--quiet", root]);
     await writeFile(
@@ -58,9 +65,17 @@ describe("Visual Remote Vite integration", () => {
         "utf8",
       );
     }
+    let configureCalls = 0;
+    const restartErrors: string[] = [];
+    const logger = createLogger("silent");
+    logger.error = (message) => { restartErrors.push(message); };
     const apiFixture: Plugin = {
       name: "api-fixture",
       configureServer(server) {
+        configureCalls += 1;
+        if (failure !== "none" && configureCalls === 2) {
+          throw new Error("replacement configureServer failed");
+        }
         server.middlewares.use((request, response, next) => {
           if (request.url !== "/api/ping") {
             next();
@@ -74,7 +89,7 @@ describe("Visual Remote Vite integration", () => {
     const server = await createServer({
       root,
       configFile,
-      customLogger: createLogger("silent"),
+      customLogger: logger,
       server: {
         host: "127.0.0.1",
         port: appPort,
@@ -100,13 +115,23 @@ describe("Visual Remote Vite integration", () => {
       expect(await responseStatus(`${origin}/_visual/viewer`)).toBe(200);
       const originalInstance = await readInstance(root);
       expect(originalInstance?.gatewayUrl).toBe(`http://127.0.0.1:${bridgePort}`);
-      for (let restart = 0; restart < 2; restart += 1) {
+      if (failure !== "none") {
+        await server.restart();
+        expect(restartErrors).toContain("replacement configureServer failed");
+        expect(restartErrors).toContain("server restart failed");
+        expect(await responseStatus(`${origin}/_visual/client.js`)).toBe(200);
+        expect(await responseStatus(`${origin}/api/ping`)).toBe(200);
+        expect((await readInstance(root))?.startedAt).toBe(originalInstance?.startedAt);
+      }
+      const successfulRestarts = failure === "close" ? 0 : 2;
+      for (let restart = 0; restart < successfulRestarts; restart += 1) {
         await server.restart();
         expect(await responseStatus(`${origin}/_visual/client.js`)).toBe(200);
         expect(await responseStatus(`${origin}/api/ping`)).toBe(200);
         expect((await readInstance(root))?.startedAt).toBe(originalInstance?.startedAt);
       }
-      expect(pluginInstances).toBe(mode === "reloaded config" ? 3 : 1);
+      expect(configureCalls).toBe(1 + successfulRestarts + (failure === "none" ? 0 : 1));
+      expect(pluginInstances).toBe(mode === "reloaded config" ? configureCalls : 1);
     } finally {
       await server.close();
       delete factories[factoryKey];

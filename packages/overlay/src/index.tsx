@@ -134,6 +134,8 @@ const ACTIVE_PHASES = new Set<TaskStatus>([
 
 const ERROR_PHASES = new Set<TaskStatus>(["failed", "unsafe"]);
 
+const TASK_HYDRATION_TIMEOUT_MS = 3_000;
+
 function eventIsFromOverlay(event: Event): boolean {
   return event.composedPath().some(
     (node) => node instanceof HTMLElement && node.id === OVERLAY_HOST_ID,
@@ -906,6 +908,32 @@ function Overlay({ host }: { host: HTMLElement }) {
     mountedRef.current = true;
     let hydrating = true;
     const bufferedEvents: ServerEvent[] = [];
+    const hydrationController = new AbortController();
+    const finishHydration = () => {
+      if (!hydrating) return;
+      hydrating = false;
+      window.clearTimeout(hydrationTimer);
+      if (active) {
+        if (!activeTaskIdRef.current) {
+          for (const event of bufferedEvents) {
+            const record = taskFromEvent(event);
+            if (record?.originBrowserSessionId === browserSessionId) {
+              activeTaskIdRef.current = record.id;
+              break;
+            }
+          }
+        }
+        for (const event of bufferedEvents) {
+          handleServerEvent(event);
+        }
+      }
+      bufferedEvents.length = 0;
+    };
+    // A stalled snapshot must not hold a healthy live connection hostage.
+    const hydrationTimer = window.setTimeout(() => {
+      finishHydration();
+      hydrationController.abort();
+    }, TASK_HYDRATION_TIMEOUT_MS);
     const bridge = new BridgeConnection({
       token,
       browserSessionId,
@@ -935,9 +963,9 @@ function Overlay({ host }: { host: HTMLElement }) {
         }
       })
       .catch(() => undefined);
-    void fetchLatestTaskForSession(token, browserSessionId)
+    void fetchLatestTaskForSession(token, browserSessionId, hydrationController.signal)
       .then((latestTask) => {
-        if (!active || !latestTask) {
+        if (!active || !hydrating || !latestTask) {
           return;
         }
         setTask((current) => {
@@ -963,27 +991,13 @@ function Overlay({ host }: { host: HTMLElement }) {
         void loadArtifacts(latestTask.id);
       })
       .catch(() => undefined)
-      .finally(() => {
-        hydrating = false;
-        if (active) {
-          if (!activeTaskIdRef.current) {
-            for (const event of bufferedEvents) {
-              const record = taskFromEvent(event);
-              if (record?.originBrowserSessionId === browserSessionId) {
-                activeTaskIdRef.current = record.id;
-                break;
-              }
-            }
-          }
-          for (const event of bufferedEvents) {
-            handleServerEvent(event);
-          }
-        }
-        bufferedEvents.length = 0;
-      });
+      .finally(finishHydration);
 
     return () => {
       active = false;
+      hydrating = false;
+      window.clearTimeout(hydrationTimer);
+      hydrationController.abort();
       mountedRef.current = false;
       bufferedEvents.length = 0;
       pendingActionRef.current = null;

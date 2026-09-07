@@ -1,5 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { resolve } from "node:path";
-import type { Plugin, UserConfig } from "vite";
+import type { Plugin, UserConfig, ViteDevServer } from "vite";
 import {
   BridgeAlreadyRunningError,
   isProcessAlive,
@@ -39,6 +40,18 @@ const bridgeState = globalThis as typeof globalThis & {
   [bridgesKey]?: Map<string, SharedViteBridge>;
 };
 const bridges = bridgeState[bridgesKey] ??= new Map<string, SharedViteBridge>();
+
+interface RestartCandidate {
+  config: ViteDevServer["config"];
+  close(): Promise<void>;
+}
+
+// Replacement config reloads must participate in the original server's restart.
+const restartsKey = Symbol.for("visual-remote.vite.restarts");
+const restartState = globalThis as typeof globalThis & {
+  [restartsKey]?: AsyncLocalStorage<RestartCandidate[]>;
+};
+const restarts = restartState[restartsKey] ??= new AsyncLocalStorage<RestartCandidate[]>();
 
 async function acquireBridge(
   options: VisualRemoteViteOptions,
@@ -158,8 +171,37 @@ export function visualRemote(options: VisualRemoteViteOptions = {}): Plugin {
       },
     },
     async configureServer(server) {
+      // Vite can abandon a partially configured replacement without closing it.
+      const candidate: RestartCandidate = { config: server.config, close: server.close };
+      restarts.getStore()?.push(candidate);
+      const restart = server.restart;
+      server.restart = (forceOptimize) => {
+        const candidates: RestartCandidate[] = [];
+        return restarts.run(candidates, async () => {
+          try {
+            return await restart(forceOptimize);
+          } finally {
+            // Vite resolves even on startup failure; only success adopts config.
+            for (const replacement of candidates) {
+              if (replacement.config !== server.config) await replacement.close();
+            }
+          }
+        });
+      };
       // Each server owns a lease, even when restart reuses this plugin object.
       const serverLease = await acquireBridge(options, server.config);
+      const close = server.close;
+      server.close = async () => {
+        try {
+          await close();
+        } finally {
+          await serverLease.release();
+        }
+      };
+      candidate.close = server.close;
+      server.httpServer?.once("close", () => {
+        void serverLease.release();
+      });
       const { bridge } = serverLease;
       bridge.ownedBridge?.gateway.server.unref();
       server.config.server.proxy ??= {};
@@ -175,17 +217,6 @@ export function visualRemote(options: VisualRemoteViteOptions = {}): Plugin {
             : `[visual-remote] Pair: ${bridge.openUrl}`,
         );
       }
-      const close = server.close;
-      server.close = async () => {
-        try {
-          await close();
-        } finally {
-          await serverLease?.release();
-        }
-      };
-      server.httpServer?.once("close", () => {
-        void serverLease?.release();
-      });
     },
   };
 }

@@ -440,6 +440,90 @@ for (const hydration of ["snapshot", "empty", "failed"] as const) {
   });
 }
 
+test("overlay bounds hanging hydration and ignores its late snapshot", async ({ page }) => {
+  const sessionId = randomUUID();
+  const taskA = overlayTask("timed-out-task", sessionId, "queued");
+  const taskB = overlayTask("live-after-timeout", sessionId, "queued");
+  const releaseSnapshot = deferred<void>();
+  const snapshotRequested = deferred<void>();
+  const clockTime = new Date("2026-01-01T00:00:00Z");
+  await page.clock.install({ time: clockTime });
+  // Simulate a transport that still resolves after cancellation, so the test
+  // checks the stale-result guard as well as the deadline's abort signal.
+  await page.addInitScript(() => {
+    const originalSetTimeout = window.setTimeout.bind(window);
+    Object.defineProperty(window, "setTimeout", {
+      value: (handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+        if (timeout === 3_000) {
+          (window as Window & { hydrationDeadline?: number }).hydrationDeadline = Date.now() + timeout;
+        }
+        return originalSetTimeout(handler, timeout, ...args);
+      },
+    });
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      if (input === "/_visual/api/tasks") {
+        const { signal, ...requestInit } = init ?? {};
+        (window as Window & { hydrationSignal?: AbortSignal | null }).hydrationSignal = signal ?? null;
+        return originalFetch(input, requestInit);
+      }
+      return originalFetch(input, init);
+    };
+  });
+  await page.route("**/_visual/api/tasks", async (route) => {
+    snapshotRequested.resolve();
+    await releaseSnapshot.promise;
+    await route.fulfill({ json: [{ ...taskA, status: "running_agent" }] });
+  });
+  const socketReady = await routeOverlaySocket(page, sessionId);
+  await page.goto(`${fixture.origin}/#visual-pair=${controlToken}`);
+  const socket = await socketReady.connected;
+  await snapshotRequested.promise;
+  socket.send(JSON.stringify({ type: "task.queued", seq: 1, taskId: taskA.id, payload: taskA }));
+  socket.send(JSON.stringify({
+    type: "task.completed", seq: 2, taskId: taskA.id,
+    payload: { ...taskA, status: "review" },
+  }));
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("visual-bridge:last-sequence"))).toBe("2");
+  const strip = page.locator("#visual-task-strip");
+  const deadline = await page.evaluate(() =>
+    (window as Window & { hydrationDeadline?: number }).hydrationDeadline,
+  );
+  expect(deadline).toBeDefined();
+  // Let Preact effects and socket startup run normally, then stop immediately
+  // before the captured hydration deadline rather than guessing startup time.
+  await page.clock.pauseAt(new Date(deadline! - 1));
+  await expect(strip).toHaveCount(0);
+  await page.clock.runFor(1);
+  await page.clock.resume();
+  await expect(strip.locator(".phase-mark")).toHaveAttribute("data-state", "review");
+  await expect(strip.locator(".strip-title")).toHaveText(taskA.requestText);
+  await expect(strip.getByRole("button", { name: "변경 유지", exact: true })).toBeEnabled();
+  expect(await page.evaluate(() =>
+    (window as Window & { hydrationSignal?: AbortSignal }).hydrationSignal?.aborted,
+  )).toBe(true);
+
+  socket.send(JSON.stringify({ type: "task.queued", seq: 3, taskId: taskB.id, payload: taskB }));
+  socket.send(JSON.stringify({
+    type: "task.completed", seq: 4, taskId: taskB.id,
+    payload: { ...taskB, status: "review" },
+  }));
+  await expect(strip.locator(".strip-title")).toHaveText(taskB.requestText);
+  await expect(strip.locator(".phase-mark")).toHaveAttribute("data-state", "review");
+  const snapshotResponse = page.waitForResponse("**/_visual/api/tasks");
+  releaseSnapshot.resolve();
+  await (await snapshotResponse).finished();
+  // A live event after the stale response also proves the active task binding
+  // and connection remain usable, not merely that the old strip stayed visible.
+  socket.send(JSON.stringify({
+    type: "task.log", seq: 5, taskId: taskB.id, payload: { message: "live after stale snapshot" },
+  }));
+  await expect(strip.locator(".log-summary")).toHaveText("live after stale snapshot");
+  await expect(strip.locator(".strip-title")).toHaveText(taskB.requestText);
+  await expect(strip.locator(".phase-mark")).toHaveAttribute("data-state", "review");
+  await expect(strip.getByRole("button", { name: "변경 유지", exact: true })).toBeEnabled();
+});
+
 for (const outcome of ["success", "error"] as const) {
   for (const newerAction of [false, true]) {
     test(`overlay isolates delayed A ${outcome} with B action ${newerAction}`, async ({ page }) => {
