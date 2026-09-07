@@ -564,9 +564,11 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
     if (authMode === "local") localAuthorities.add(url.host);
   }
   if (authMode === "local") {
-    const gatewayOrigin = new URL(`http://${gatewayDisplayHost(host)}:${port}`);
-    allowedOrigins.add(gatewayOrigin.origin);
-    localAuthorities.add(gatewayOrigin.host);
+    for (const hostname of ["localhost", "127.0.0.1", "[::1]"]) {
+      const gatewayOrigin = new URL(`http://${hostname}:${port}`);
+      allowedOrigins.add(gatewayOrigin.origin);
+      localAuthorities.add(gatewayOrigin.host);
+    }
   }
   const overlayBundlePath = options.overlayBundlePath ?? DEFAULT_OVERLAY_BUNDLE_PATH;
   const viewerBundlePath = options.viewerBundlePath ?? DEFAULT_VIEWER_BUNDLE_PATH;

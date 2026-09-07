@@ -157,6 +157,30 @@ describe("Gateway server", () => {
     for (const path of ["client.js", "viewer.js", "viewer", "api/health"]) {
       expect((await fetch(`${url}/_visual/${path}`)).status).toBe(200);
     }
+    for (const hostname of ["localhost", "127.0.0.1", "[::1]"]) {
+      const authority = `${hostname}:${gatewayPort}`;
+      for (const path of ["bootstrap", "client.js", "viewer.js", "viewer", "api/health"]) {
+        const status = await new Promise<number | undefined>((resolve, reject) => {
+          const request = httpRequest(`${url}/_visual/${path}`, {
+            headers: { host: authority, origin: `http://${authority}` },
+          }, (response) => { response.resume(); resolve(response.statusCode); });
+          request.once("error", reject);
+          request.end();
+        });
+        expect(status).toBe(200);
+      }
+      const socket = await new Promise<WebSocket>((resolve, reject) => {
+        const connection = new WebSocket(`${url.replace("http:", "ws:")}/_visual/ws`, {
+          headers: { host: authority }, origin: `http://${authority}`,
+        });
+        connection.once("open", () => resolve(connection));
+        connection.once("error", reject);
+      });
+      const ready = nextMessage(socket);
+      socket.send(JSON.stringify({ type: "session.open", payload: { mode: "control" } }));
+      await expect(ready).resolves.toMatchObject({ type: "session.ready" });
+      socket.close();
+    }
     expect(await (await fetch(`${url}/_visual/api/viewer-session`)).json()).toEqual({ viewerUrl: "/_visual/viewer" });
     expect((await fetch(`${url}/_visual/api/health`, {
       headers: { "X-Visual-Mode": "viewer", origin: `http://localhost:${upstreamPort}` },
