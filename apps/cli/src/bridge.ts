@@ -54,6 +54,8 @@ export interface StartAttachBridgeOptions {
   host?: string;
   publicUrl?: string;
   fallbackPublicUrl?: string;
+  /** Allow both IPv4 loopback names only for an otherwise unconfigured local fallback. */
+  fallbackLoopbackOrigins?: boolean;
 }
 
 export interface StartManagedBridgeOptions {
@@ -226,6 +228,7 @@ interface StartBridgeCoreOptions {
   host?: string;
   publicUrl?: string;
   fallbackPublicUrl?: string;
+  fallbackLoopbackOrigins?: boolean;
   managedProcess?: ManagedProcess;
   lock?: WorktreeLock;
 }
@@ -299,6 +302,19 @@ async function startBridgeCore(
     controlService = await resolveControlService(dependencies, controlContext);
     const allowedOrigins = new Set(loadedConfig.config.security.allowedOrigins);
     if (publicUrl !== undefined) allowedOrigins.add(new URL(publicUrl).origin);
+    if (
+      options.fallbackLoopbackOrigins === true
+      && options.publicUrl === undefined
+      && loadedConfig.config.gateway.publicUrl === undefined
+      && loadedConfig.config.security.allowedOrigins.length === 0
+      && publicUrl !== undefined
+    ) {
+      const loopbackUrl = new URL(publicUrl);
+      if (loopbackUrl.hostname === "localhost" || loopbackUrl.hostname === "127.0.0.1") {
+        loopbackUrl.hostname = loopbackUrl.hostname === "localhost" ? "127.0.0.1" : "localhost";
+        allowedOrigins.add(loopbackUrl.origin);
+      }
+    }
     gateway = createGatewayServer({
       upstream: options.upstreamUrl,
       pairingToken: token,
@@ -416,6 +432,9 @@ export async function startAttachBridge(
       ...(options.fallbackPublicUrl === undefined
         ? {}
         : { fallbackPublicUrl: options.fallbackPublicUrl }),
+      ...(options.fallbackLoopbackOrigins === undefined
+        ? {}
+        : { fallbackLoopbackOrigins: options.fallbackLoopbackOrigins }),
     },
     dependencies,
   );

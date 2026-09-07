@@ -62,7 +62,7 @@ async function stop(child: ChildProcess): Promise<void> {
   await terminateChildProcessTree(child, 5_000);
 }
 
-test("Next.js serves Pair, HTTP, and Visual Remote WebSocket on the app port", async () => {
+test("Next.js serves Pair, HTTP, and Visual Remote WebSocket on the app port", async ({ page }) => {
   const outputRoot = resolve(repositoryRoot, "output");
   await mkdir(outputRoot, { recursive: true });
   const fixtureRoot = await mkdtemp(join(outputRoot, "next-single-port-"));
@@ -181,6 +181,42 @@ test("Next.js serves Pair, HTTP, and Visual Remote WebSocket on the app port", a
       payload: { authenticated: true, access: "control" },
     });
     socket.close();
+
+    await page.goto(`http://127.0.0.1:${appPort}`);
+    expect(new URL(page.url()).origin).toBe(`http://127.0.0.1:${appPort}`);
+    const browserAuthenticated = await page.evaluate(async (pairingToken) => {
+      const url = new URL("/_visual/ws", window.location.href);
+      url.protocol = "ws:";
+      const browserSocket = new WebSocket(url);
+      return await new Promise<unknown>((resolveMessage, reject) => {
+        browserSocket.addEventListener("open", () => {
+          browserSocket.send(JSON.stringify({
+            id: "next-browser-origin-auth",
+            type: "auth",
+            browserSessionId: "00000000-0000-4000-8000-000000000002",
+            payload: { token: pairingToken },
+          }));
+        }, { once: true });
+        browserSocket.addEventListener("message", (event) => {
+          try {
+            resolveMessage(JSON.parse(String(event.data)) as unknown);
+          } catch (error) {
+            reject(error);
+          } finally {
+            browserSocket.close();
+          }
+        }, { once: true });
+        browserSocket.addEventListener("error", () => {
+          browserSocket.close();
+          reject(new Error("Same-origin browser WebSocket failed"));
+        }, { once: true });
+      });
+    }, token);
+    expect(browserAuthenticated).toMatchObject({
+      type: "auth.ok",
+      projectId: "next-single-port",
+      payload: { authenticated: true, access: "control" },
+    });
   } catch (error) {
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}\n\nNext output:\n${output}`,
