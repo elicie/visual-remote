@@ -1,13 +1,16 @@
 /// <reference lib="dom" />
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import type { CaptureResult, ComparisonMeasuredTarget, ContextBundle, Rect } from "@visual-remote/protocol";
+import { redactText } from "../context/sanitize.js";
 
 const TIMEOUT = 30_000;
 const HELP = "Open the verification browser and sign in to its separate profile. Only URL-addressable state is supported; original-tab in-memory modals, form values and sessionStorage are not copied.";
 const INSTALL = "Verification browser is not installed. Install Google Chrome or run `npx --yes --package playwright@1.62.1 playwright install chromium`, then retry.";
 const missingExecutable = (message: string) => /executable (?:doesn't exist|does not exist)|distribution ['"]?chrome['"]? is not found/i.test(message);
+class VerificationStateMismatch extends Error {}
 function diagnosticRoute(value: string | undefined): string {
   if (!value) return "unavailable";
   try {
@@ -15,8 +18,8 @@ function diagnosticRoute(value: string | undefined): string {
     return ["http:", "https:"].includes(url.protocol) ? `${url.origin}${url.pathname}` : "non-HTTP(S) page";
   } catch { return "invalid URL"; }
 }
-export interface ComparisonBrowserOptions { profileDirectory: string; upstreamUrl: string; headless?: boolean; executablePath?: string }
-interface ActiveTask { id: string; url: string; page?: Page; creating?: Promise<Page>; signal: AbortSignal; abort: () => void }
+export interface ComparisonBrowserOptions { profileDirectory: string; upstreamUrl: string; headless?: boolean; executablePath?: string; preflightTimeoutMs?: number }
+interface ActiveTask { id: string; url: string; page?: Page; creating?: Promise<Page>; signal: AbortSignal; abort: () => void; mismatch?: string }
 
 /** Owns only a dedicated persistent profile, never the user's existing browser. */
 export class ComparisonBrowser {
@@ -30,12 +33,16 @@ export class ComparisonBrowser {
   constructor(private readonly options: ComparisonBrowserOptions) {
     this.upstream = new URL(options.upstreamUrl);
     if (!["http:", "https:"].includes(this.upstream.protocol) || this.upstream.username || this.upstream.password) throw new Error("Verification upstream must be an HTTP(S) URL without credentials.");
+    if (options.preflightTimeoutMs !== undefined && (!Number.isFinite(options.preflightTimeoutMs) || options.preflightTimeoutMs <= 0 || options.preflightTimeoutMs > TIMEOUT)) throw new Error("Verification preflight timeout must be greater than zero and at most 30000 milliseconds.");
   }
   private taskUrl(context?: ContextBundle): string {
     if (!context) return this.upstream.href;
     const source = new URL(context.page.url);
     if (!["http:", "https:"].includes(source.protocol) || source.username || source.password) throw new Error("Verification page must be an HTTP(S) URL without credentials.");
     const destination = new URL(this.upstream.origin);
+    // Loopback aliases are distinct cookie/storage hosts; keep the source identity,
+    // but never let source URLs select an arbitrary upstream or its protocol/port.
+    if (["localhost", "127.0.0.1"].includes(this.upstream.hostname) && ["localhost", "127.0.0.1"].includes(source.hostname)) destination.hostname = source.hostname;
     destination.pathname = source.pathname;
     destination.search = source.search;
     destination.hash = source.hash;
@@ -107,8 +114,24 @@ export class ComparisonBrowser {
         if (this.active !== task || signal.aborted) { await page.close(); signal.throwIfAborted(); throw new Error("Verification task was finished."); }
         await page.setViewportSize({ width, height });
         await this.navigate(task, context);
-        await this.geometry(task, context, true);
-      });
+        let matchingPolls = 0;
+        while (matchingPolls < 2) {
+          signal.throwIfAborted();
+          if (this.active !== task) throw new Error("Verification task was finished.");
+          try {
+            await this.geometry(task, context, true);
+            matchingPolls += 1;
+          } catch (error) {
+            if (!(error instanceof VerificationStateMismatch)) throw error;
+            matchingPolls = 0;
+            task.mismatch = error.message;
+          }
+          // Retry only reproducible state mismatches; navigation/runtime errors
+          // are terminal. Require consecutive matches rather than a fixed sleep.
+          if (matchingPolls < 2) await delay(100, undefined, { signal });
+        }
+        delete task.mismatch;
+      }, this.options.preflightTimeoutMs ?? TIMEOUT);
     } catch (error) { await this.finish(taskId); throw error; }
   }
   private checkRoute(task: ActiveTask): void {
@@ -127,7 +150,7 @@ export class ComparisonBrowser {
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     }, context.page.scroll);
   }
-  private async bounded<T>(task: ActiveTask, operation: () => Promise<T>): Promise<T> {
+  private async bounded<T>(task: ActiveTask, operation: () => Promise<T>, timeout = TIMEOUT): Promise<T> {
     task.signal.throwIfAborted();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
@@ -136,16 +159,20 @@ export class ComparisonBrowser {
         onAbort = () => reject(task.signal.reason ?? new Error("Verification canceled."));
         task.signal.addEventListener("abort", onAbort, { once: true });
         if (task.signal.aborted) onAbort();
-        timer = setTimeout(() => reject(new Error(`Verification browser timed out waiting for the page, fonts or images. ${HELP}`)), TIMEOUT);
+        timer = setTimeout(() => reject(new Error(task.mismatch ? `${task.mismatch} The required state did not settle before the verification deadline.` : `Verification browser timed out waiting for the page, fonts or images. ${HELP}`)), timeout);
       })]);
     } finally { clearTimeout(timer); if (onAbort) task.signal.removeEventListener("abort", onAbort); }
   }
   private async geometry(task: ActiveTask, context: ContextBundle, preflight: boolean): Promise<Rect> {
     this.checkRoute(task);
-    return task.page!.evaluate(({ context, preflight, help }) => {
+    const measured = await task.page!.evaluate(({ context, preflight, help }) => {
+      try {
       if (innerWidth !== context.page.viewport.width || innerHeight !== context.page.viewport.height || scrollX !== context.page.scroll.x || scrollY !== context.page.scroll.y) throw new Error("Verification viewport or scroll cannot reproduce the original page exactly. " + help);
-      const rects = context.selection.targets.map((target) => {
+      const texts: Array<string | undefined> = [];
+      const rects = context.selection.targets.map((target, index) => {
+        const identity = `Target ${index + 1} (selection.targets[${index}].dom.locatorCandidates). `;
         let element: Element | undefined;
+        let usableLocator = false;
         for (const locator of target.dom.locatorCandidates) {
           let selector: string;
           if (locator.type === "id") selector = `#${CSS.escape(locator.value)}`;
@@ -154,33 +181,43 @@ export class ComparisonBrowser {
           else continue;
           try {
             const matches = document.querySelectorAll(selector);
+            usableLocator = true;
             if (matches.length === 1 && matches[0]!.tagName.toLowerCase() === target.dom.tagName.toLowerCase()) { element = matches[0]; break; }
           } catch { /* Invalid/stale locators cannot establish identity. */ }
         }
-        if (!element) throw new Error("Verification target is missing or ambiguous. " + help);
+        if (!usableLocator) throw new Error("Verification target has no valid supported selector. " + identity + help);
+        if (!element) throw { verificationStateMismatch: true, message: "Verification target is missing or ambiguous. " + identity + help };
         const rect = element.getBoundingClientRect();
         for (let parent: Element | null = element; parent; parent = parent.parentElement) {
           const style = getComputedStyle(parent);
-          if (style.display === "none" || style.visibility !== "visible" || Number(style.opacity) === 0) throw new Error("Verification target is hidden. " + help);
+          if (style.display === "none" || style.visibility !== "visible" || Number(style.opacity) === 0) throw { verificationStateMismatch: true, message: "Verification target is hidden. " + identity + help };
         }
-        if (!rect.width || !rect.height || rect.right <= 0 || rect.bottom <= 0 || rect.x >= innerWidth || rect.y >= innerHeight) throw new Error("Verification target is not visible. " + help);
+        if (!rect.width || !rect.height || rect.right <= 0 || rect.bottom <= 0 || rect.x >= innerWidth || rect.y >= innerHeight) throw { verificationStateMismatch: true, message: "Verification target is not visible. " + identity + help };
         if (preflight) {
-          const text = ((element as HTMLElement).innerText ?? element.textContent ?? "").replace(/\s+/g, " ").trim();
-          const compacted = text.length <= 500 ? text : `${text.slice(0, 499).trimEnd()}…`;
-          if (target.dom.text !== undefined && compacted !== target.dom.text.replace(/\s+/g, " ").trim()) throw new Error("Verification target text does not match the original page. " + help);
+          if (element.matches("input,textarea,select")) throw new Error("Verification cannot establish transient form values without copying private state. Select a URL-addressable non-form target. " + identity + help);
+          const text = ((element as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim();
+          texts.push(target.dom.text === undefined ? undefined : text.length <= 500 ? text : `${text.slice(0, 499).trimEnd()}…`);
           for (const key of ["role", "aria-expanded", "aria-pressed", "aria-checked", "aria-selected", "aria-modal", "open", "disabled", "type"]) {
             const expected = target.dom.attributes[key];
-            if (element.getAttribute(key) !== (expected ?? null)) throw new Error("Verification target UI state does not match the original page. " + help);
+            if (element.getAttribute(key) !== (expected ?? null)) throw { verificationStateMismatch: true, message: "Verification target UI state does not match the original page. " + identity + help };
           }
-          if (element.matches("input,textarea,select")) throw new Error("Verification cannot establish transient form values without copying private state. Select a URL-addressable non-form target. " + help);
         }
         return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
       });
-      if (context.selection.mode === "page") return { x: 0, y: 0, width: innerWidth, height: innerHeight };
-      if (context.selection.mode === "region") return context.selection.region;
+      if (context.selection.mode === "page") return { rect: { x: 0, y: 0, width: innerWidth, height: innerHeight }, texts };
+      if (context.selection.mode === "region") return { rect: context.selection.region, texts };
       const x = Math.min(...rects.map((rect) => rect.x)), y = Math.min(...rects.map((rect) => rect.y));
-      return { x, y, width: Math.max(...rects.map((rect) => rect.x + rect.width)) - x, height: Math.max(...rects.map((rect) => rect.y + rect.height)) - y };
+      return { rect: { x, y, width: Math.max(...rects.map((rect) => rect.x + rect.width)) - x, height: Math.max(...rects.map((rect) => rect.y + rect.height)) - y }, texts };
+      } catch (error) {
+        if (typeof error === "object" && error !== null && "verificationStateMismatch" in error && error.verificationStateMismatch === true && "message" in error && typeof error.message === "string") return { mismatch: error.message };
+        throw error;
+      }
     }, { context, preflight, help: HELP });
+    if (measured.mismatch !== undefined) throw new VerificationStateMismatch(measured.mismatch);
+    for (const [index, text] of measured.texts.entries()) {
+      if (text !== undefined && redactText(text) !== context.selection.targets[index]!.dom.text) throw new VerificationStateMismatch(`Verification target text does not match the original page. Target ${index + 1} (selection.targets[${index}].dom.locatorCandidates). Check that the verification browser uses the same localhost/127.0.0.1 hostname and the expected login, account and application data. ${HELP}`);
+    }
+    return measured.rect;
   }
   async capture(taskId: string, context: ContextBundle, size: { width: number; height: number }, signal: AbortSignal): Promise<CaptureResult> {
     const task = this.active;

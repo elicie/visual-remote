@@ -814,7 +814,21 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
     setBrowserMessage("");
     setBrowserError("");
     try {
-      const result = await openComparisonBrowser(token, { authMode });
+      let targets = await Promise.all(selectedRef.current.map((item, index) => item.context ?? collectTargetContext(item.element, index)));
+      if (mode === "page" && targets.length === 0) {
+        targets = await Promise.all(collectPageElements().map((element, index) => collectTargetContext(element, index)));
+      }
+      const context = createContextBundle({
+        projectId,
+        browserSessionId,
+        mode,
+        targets,
+        ...(region ? { region } : {}),
+        requestText: "검증 브라우저 설정",
+        scope,
+        renderRevision,
+      });
+      const result = await openComparisonBrowser(token, context, { authMode });
       if (mountedRef.current) setBrowserMessage(result.message);
     } catch (error) {
       if (mountedRef.current) setBrowserError(error instanceof Error ? error.message : "검증 브라우저를 열지 못했습니다. 다시 시도하세요.");

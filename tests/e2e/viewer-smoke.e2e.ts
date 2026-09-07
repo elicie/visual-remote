@@ -936,6 +936,7 @@ for (const authMode of ["local", "token"] as const) {
     const release = deferred<void>();
     let browserOpens = 0;
     await page.route("**/_visual/bootstrap", (route) => route.fulfill({ json: { authMode, projectId: "browser-fixture" } }));
+    await page.route("**/_visual/api/project", (route) => route.fulfill({ json: { projectId: "browser-fixture" } }));
     await page.route(/\/_visual\/api\/tasks(?:\?.*)?$/u, (route) => route.fulfill({ json: [] }));
     await page.routeWebSocket("**/_visual/ws", (socket) => socket.onMessage((raw) => {
       const frame = JSON.parse(String(raw));
@@ -945,7 +946,17 @@ for (const authMode of ["local", "token"] as const) {
     await page.route("**/_visual/api/comparison-browser", async (route) => {
       browserOpens++;
       expect(route.request().method()).toBe("POST");
-      expect(route.request().postDataJSON()).toEqual({});
+      const payload = route.request().postDataJSON();
+      expect(payload.context.page.url).toBe(`${fixture.origin}/?view=setup#current-section`);
+      expect(payload.context.page.pathname).toBe("/");
+      expect(payload.context.page.viewport).toEqual(page.viewportSize());
+      expect(payload.context.projectId).toBe("browser-fixture");
+      expect(payload.context.selection.mode).toBe("element");
+      expect(payload.context.selection.targets[0].dom.text).toBe("Save changes");
+      expect(payload.context.request.text).toBe("검증 브라우저 설정");
+      for (const secret of [controlToken, "attribute-secret", "cookie-secret", "storage-secret", "form-secret", "request-secret", "visual-pair="]) {
+        expect(JSON.stringify(payload)).not.toContain(secret);
+      }
       expect(route.request().headers().authorization).toBe(authMode === "token" ? `Bearer ${controlToken}` : undefined);
       if (browserOpens === 1) {
         await release.promise;
@@ -953,8 +964,18 @@ for (const authMode of ["local", "token"] as const) {
       } else await route.fulfill({ json: { status: "ready", message: "검증 브라우저가 열렸습니다." } });
     });
     await page.goto(`${fixture.origin}${authMode === "token" ? `#visual-pair=${controlToken}` : ""}`);
+    await page.evaluate(() => {
+      history.replaceState(null, "", "/?view=setup#current-section");
+      document.cookie = "setup-private=cookie-secret; Path=/";
+      localStorage.setItem("setup-private", "storage-secret");
+      document.querySelector("button")?.setAttribute("data-token", "attribute-secret");
+      const input = document.createElement("input");
+      input.type = "password";
+      input.value = "form-secret";
+      document.body.append(input);
+    });
     await page.getByRole("button", { name: "Save changes" }).click();
-    await page.getByPlaceholder("선택한 화면을 어떻게 바꿀까요?").fill("Match https://www.figma.com/design/Abc/Frame?node-id=1-2");
+    await page.getByPlaceholder("선택한 화면을 어떻게 바꿀까요?").fill("request-secret Match https://www.figma.com/design/Abc/Frame?node-id=1-2");
     const viewport = page.viewportSize();
     const location = page.url();
     expect(browserOpens).toBe(0);

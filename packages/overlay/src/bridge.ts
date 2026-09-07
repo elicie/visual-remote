@@ -437,11 +437,11 @@ async function responseValue(response: Response): Promise<unknown> {
   return text ? safeJsonParse(text) : null;
 }
 
-export async function openComparisonBrowser(token: string, options: BridgeRequestOptions = {}): Promise<{ status: "ready"; message: string }> {
+export async function openComparisonBrowser(token: string, context: ContextBundle, options: BridgeRequestOptions = {}): Promise<{ status: "ready"; message: string }> {
   const value = recordOf(await responseValue(await authorizedFetch(
     token,
     "/_visual/api/comparison-browser",
-    { method: "POST", body: JSON.stringify({}) },
+    { method: "POST", body: JSON.stringify({ context }) },
     options,
   )));
   if (value?.status !== "ready" || typeof value.message !== "string") {
