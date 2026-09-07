@@ -3,6 +3,38 @@ import { describe, expect, it } from "vitest";
 import { ClaudeEventParser } from "@visual-remote/bridge-core";
 
 describe("ClaudeEventParser", () => {
+  it("extracts only tool names from native system and result denials", () => {
+    const parser = new ClaudeEventParser();
+    expect(parser.parse(JSON.stringify({
+      type: "system", subtype: "permission_denied", tool_name: "mcp__figma__download",
+      tool_use_id: "call-1", decision_reason: "secret", message: "secret", tool_input: { token: "secret" },
+    }))).toEqual([{ type: "permission_denied", toolName: "mcp__figma__download" }]);
+    expect(parser.parse(JSON.stringify({
+      type: "result", subtype: "success", result: "secret",
+      permission_denials: [
+        { tool_name: "mcp__figma__download", tool_use_id: "call-1", tool_input: { token: "secret" } },
+        { tool_name: "Bash", tool_input: { command: "secret" } },
+        { tool_use_id: "unknown", tool_input: "secret" },
+      ],
+    }))).toEqual([
+      { type: "permission_denied", toolName: "mcp__figma__download" },
+      { type: "permission_denied", toolName: "Bash" },
+      { type: "permission_denied" },
+    ]);
+  });
+
+  it("keeps unknown denials unnamed and never infers denial from prose or tool errors", () => {
+    const parser = new ClaudeEventParser();
+    expect(parser.parse(JSON.stringify({ type: "system", subtype: "permission_denied", name: "invented" })))
+      .toEqual([{ type: "permission_denied" }]);
+    expect(parser.parse(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "permission denied" }] } })))
+      .toEqual([{ type: "message", text: "permission denied" }]);
+    expect(parser.parse(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", is_error: true, content: "permission denied" }] } })))
+      .toEqual([{ type: "tool_end", name: "tool", ok: false }]);
+    expect(parser.parse(JSON.stringify({ type: "result", permission_denials: [], result: "permission denied" })))
+      .toEqual([{ type: "complete", summary: "permission denied" }]);
+  });
+
   it("normalizes sessions, tools, messages, usage, and completion", () => {
     const parser = new ClaudeEventParser("/repo");
     const lines = [

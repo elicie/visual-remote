@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AgentCanceledError,
+  AgentPermissionDeniedError,
+  type AgentAdapter,
   FakeAgentAdapter,
   GitTransactionManager,
   SqliteTaskStore,
@@ -55,6 +57,92 @@ describe("TaskService", () => {
 
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map(async (path) => await rm(path, { recursive: true })));
+  });
+
+  it("retries only observed MCP denials with private cumulative approvals and a fresh session", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const firstTool = "mcp__figma__download_image";
+    const secondTool = "mcp__figma__get_frame";
+    const fake = new FakeAgentAdapter(async function* (input) {
+      yield { type: "session", sessionId: `session-${input.taskId}` };
+      if (!input.allowedTools?.includes(firstTool)) {
+        yield { type: "permission_denied", toolName: firstTool };
+        throw new AgentPermissionDeniedError([firstTool]);
+      }
+      if (!input.allowedTools.includes(secondTool)) throw new AgentPermissionDeniedError([secondTool]);
+      yield { type: "complete" };
+    });
+    const resume = vi.fn(fake.run.bind(fake));
+    const adapter: AgentAdapter = { id: "claude", probe: fake.probe.bind(fake), run: fake.run.bind(fake), resume };
+    const store = new SqliteTaskStore(":memory:");
+    const service = new TaskService({ projectId: "fixture-project", adapter, store, git: await GitTransactionManager.open(fixture.root) });
+    const originalContext = context("download reference");
+    const original = service.create(originalContext);
+    await service.waitForIdle();
+    expect(service.get(original.id)).toMatchObject({ status: "failed", permissionDeniedTools: [firstTool], error: { code: "AGENT_PERMISSION_DENIED" } });
+    for (const tools of [[], ["Bash"], ["mcp__figma__*"], [secondTool], [firstTool, firstTool], ["mcp__figma__download_image "]]) {
+      expect(() => service.approveToolsAndRetry(original.id, tools)).toThrow(TaskServiceError);
+    }
+    const retry = service.approveToolsAndRetry(original.id, [firstTool]);
+    expect(retry.parentTaskId).toBe(original.id);
+    expect(retry).not.toHaveProperty("approvedTools");
+    expect(store.getTask(retry.id)?.contextBundle).toEqual(originalContext);
+    await service.waitForIdle();
+    expect(service.get(retry.id)).toMatchObject({ status: "failed", permissionDeniedTools: [secondTool], error: { code: "AGENT_PERMISSION_DENIED" } });
+    const next = service.approveToolsAndRetry(retry.id, [secondTool]);
+    await service.waitForIdle();
+    expect(service.get(next.id)?.status).toBe("review");
+    expect(fake.runs.map((run) => run.input.allowedTools)).toEqual([undefined, [firstTool], [firstTool, secondTool]]);
+    expect(resume).not.toHaveBeenCalled();
+    expect(() => service.approveToolsAndRetry(next.id, [firstTool])).toThrow(TaskServiceError);
+    const ordinary = service.create(context("ordinary followup"), { parentTaskId: next.id, approvedTools: [firstTool] } as never);
+    await service.waitForIdle();
+    expect(fake.runs.at(-1)?.input.allowedTools).toBeUndefined();
+    expect(store.getTask(ordinary.id)?.approvedTools).toBeUndefined();
+    expect(resume).not.toHaveBeenCalled();
+    expect(JSON.stringify(service.replay())).not.toContain('"approvedTools"');
+    await service.close();
+  });
+
+  it("restores queued retry approvals after restart without resuming the denied session", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const database = resolve(fixture.parent, "approvals.sqlite");
+    const bundle = context("queued retry");
+    const tool = "mcp__figma__download_image";
+    const initial = new SqliteTaskStore(database);
+    const parent: StoredTask = { id: "denied", projectId: bundle.projectId, status: "failed", requestText: bundle.request.text, scope: bundle.request.scope, originBrowserSessionId: bundle.browserSessionId, contextBundle: bundle, agentAdapter: "claude", agentSessionId: "denied-session", permissionDeniedTools: [tool], error: { code: "AGENT_PERMISSION_DENIED", message: "denied" }, changedFiles: [], createdAt: "2026-01-01T00:00:00.000Z" };
+    initial.createTask(parent);
+    const queued: StoredTask = { ...parent, id: "queued-retry", status: "queued", parentTaskId: parent.id, approvedTools: [tool] };
+    delete queued.agentSessionId;
+    delete queued.permissionDeniedTools;
+    delete queued.error;
+    initial.createTask(queued);
+    initial.close();
+    const fake = new FakeAgentAdapter();
+    const resume = vi.fn(fake.run.bind(fake));
+    const service = new TaskService({ projectId: bundle.projectId, adapter: { id: "claude", probe: fake.probe.bind(fake), run: fake.run.bind(fake), resume }, store: new SqliteTaskStore(database), git: await GitTransactionManager.open(fixture.root) });
+    await service.waitForIdle();
+    expect(fake.runs).toHaveLength(1);
+    expect(fake.runs[0]?.input.allowedTools).toEqual([tool]);
+    expect(resume).not.toHaveBeenCalled();
+    expect(service.get(queued.id)?.status).toBe("review");
+    await service.close();
+  });
+
+  it.each([undefined, "Bash"])("keeps unknown or built-in denial actionable without MCP approval (%s)", async (toolName) => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const fake = new FakeAgentAdapter(async function* () {
+      yield toolName ? { type: "permission_denied", toolName } : { type: "permission_denied" };
+    });
+    const service = new TaskService({ projectId: "fixture-project", adapter: { id: "claude", probe: fake.probe.bind(fake), run: fake.run.bind(fake) }, store: new SqliteTaskStore(":memory:"), git: await GitTransactionManager.open(fixture.root) });
+    const task = service.create(context("denied"));
+    await service.waitForIdle();
+    expect(service.get(task.id)).toMatchObject({ status: "failed", error: { code: "AGENT_PERMISSION_DENIED" }, permissionDeniedTools: toolName ? [toolName] : [] });
+    expect(() => service.approveToolsAndRetry(task.id, ["mcp__figma__download_image"])).toThrow(TaskServiceError);
+    await service.close();
   });
 
   it("normalizes frame links and honors an explicit disabled override", () => {
@@ -128,6 +216,27 @@ describe("TaskService", () => {
     await service.waitForIdle();
     expect(service.get(task.id)).toMatchObject({ status: "failed", comparison: { status: "blocked", iterations: [] } });
     expect(service.get(task.id)?.comparison?.message).toContain("Verification browser unavailable");
+    await service.close();
+  });
+
+  it("preserves permission failure during comparison reference preparation instead of missing-file errors", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const tool = "mcp__figma__download_image";
+    const capture = vi.fn();
+    const finish = vi.fn(async () => {});
+    const adapter = new FakeAgentAdapter(async function* () {
+      yield { type: "permission_denied", toolName: tool };
+      throw new AgentPermissionDeniedError([tool]);
+    });
+    const service = new TaskService({ projectId: "fixture-project", adapter, store: new SqliteTaskStore(":memory:"), git: await GitTransactionManager.open(fixture.root), comparisonRoot: resolve(fixture.parent, "comparisons"), comparisonBrowser: { begin: async () => {}, capture, finish } });
+    const task = service.create(context("Match https://www.figma.com/design/ABC/frame?node-id=1-2"));
+    await service.waitForIdle();
+    expect(service.get(task.id)).toMatchObject({ status: "failed", permissionDeniedTools: [tool], error: { code: "AGENT_PERMISSION_DENIED" }, comparison: { status: "blocked" } });
+    expect(service.get(task.id)?.error?.message).not.toContain("ENOENT");
+    expect(capture).not.toHaveBeenCalled();
+    expect(finish).toHaveBeenCalledOnce();
+    expect(adapter.runs).toHaveLength(1);
     await service.close();
   });
 

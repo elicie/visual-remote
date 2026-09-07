@@ -290,7 +290,7 @@ function parseApiRoute(method: string, path: string): ApiRoute | undefined {
     return undefined;
   }
 
-  const taskMatch = /^\/_visual\/api\/tasks\/([^/]+)(?:\/(diff|files|logs|cancel|accept|revert))?$/.exec(
+  const taskMatch = /^\/_visual\/api\/tasks\/([^/]+)(?:\/(diff|files|logs|cancel|accept|revert|approve-tools))?$/.exec(
     path,
   );
   if (taskMatch === null) {
@@ -331,6 +331,9 @@ function parseApiRoute(method: string, path: string): ApiRoute | undefined {
   if (action === "revert" && method === "POST") {
     return { operation: "revertTask", taskId };
   }
+  if (action === "approve-tools" && method === "POST") {
+    return { operation: "approveTaskTools", taskId, successStatus: 201 };
+  }
   return undefined;
 }
 
@@ -353,6 +356,9 @@ async function invokeApiRoute(
   }
   if (route.operation === "openComparisonBrowser") {
     return await service.openComparisonBrowser?.(await readJsonBody(request));
+  }
+  if (route.operation === "approveTaskTools" && route.taskId !== undefined) {
+    return await service.approveTaskTools?.(route.taskId, await readJsonBody(request));
   }
   if (route.operation === "listTasks") {
     return await service.listTasks?.(parseTaskListRequest(request));

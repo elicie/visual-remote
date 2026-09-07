@@ -213,6 +213,21 @@ describe("Gateway server", () => {
     expect(openComparisonBrowser).toHaveBeenCalledExactlyOnceWith({});
   });
 
+  it.each(["local", "token"] as const)("restricts tool approval retries to control clients in %s mode", async (authMode) => {
+    const approveTaskTools = vi.fn(async () => ({ id: "retry", parentTaskId: "denied", status: "queued" }));
+    const url = await startGateway({ health: () => ({}), project: () => ({}), approveTaskTools }, { authMode, ...(authMode === "local" ? { allowedOrigins: [] } : {}) });
+    const endpoint = `${url}/_visual/api/tasks/denied/approve-tools`;
+    const body = JSON.stringify({ tools: ["mcp__figma__download_image"] });
+    const viewerHeaders: Record<string, string> = authMode === "local" ? { "X-Visual-Mode": "viewer" } : { authorization: "Bearer fixture-viewer-token", origin: "https://allowed.example" };
+    expect((await fetch(endpoint, { method: "POST", headers: { ...viewerHeaders, "content-type": "application/json" }, body })).status).toBe(403);
+    expect(approveTaskTools).not.toHaveBeenCalled();
+    const headers: Record<string, string> = authMode === "local" ? { "content-type": "application/json" } : { "content-type": "application/json", authorization: "Bearer fixture-token", origin: "https://allowed.example" };
+    const response = await fetch(endpoint, { method: "POST", headers, body });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ id: "retry", parentTaskId: "denied", status: "queued" });
+    expect(approveTaskTools).toHaveBeenCalledExactlyOnceWith("denied", { tools: ["mcp__figma__download_image"] });
+  });
+
   it("rejects foreign local hosts and origins across visual resources, not upstream", async () => {
     const url = await startGateway({
       health: () => ({ status: "ok" }), project: () => ({ id: "fixture" }),

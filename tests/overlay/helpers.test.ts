@@ -290,13 +290,12 @@ describe("task log summaries", () => {
     createdAt: "2026-08-03T00:00:00.000Z",
   });
 
-  it("preserves full multiline live output while keeping overlay summaries compact", () => {
+  it("preserves full multiline live output for both log surfaces", () => {
     const message = `  Claude output\n${"long text ".repeat(100)}\n  final line\n`;
     const output = event({ event: { type: "message", message } });
-    expect(logFromEvent(output, "full")).toBe(message);
-    expect(logFromEvent(output)).toBe(compactText(message, 500));
+    expect(logFromEvent(output)).toBe(message);
     const summary = event({ event: { type: "tool_start", name: "Read", summary: message } });
-    expect(logFromEvent(summary, "full")).toBe(`도구 시작 · Read · ${message}`);
+    expect(logFromEvent(summary)).toBe(`도구 시작 · Read · ${message}`);
   });
 
   it("shows the effective RTK command and cwd without shell-wrapper noise", () => {
@@ -491,10 +490,10 @@ describe("task history", () => {
       }
       return new Response(JSON.stringify(path.endsWith("/diff") ? { diff: "" } : []));
     }));
-    const full = await fetchTaskArtifacts("fixture-token", "task-1", undefined, { logFormat: "full" });
+    const full = await fetchTaskArtifacts("fixture-token", "task-1", undefined, { logHistory: "all" });
     expect(full.logs).toEqual(messages);
     const compact = await fetchTaskArtifacts("fixture-token", "task-1");
-    expect(compact.logs).toEqual(messages.slice(-40).map((text) => compactText(text, 500)));
+    expect(compact.logs).toEqual(messages.slice(-40));
   });
 
   it("cancels superseded artifact requests", async () => {

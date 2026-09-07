@@ -1,7 +1,9 @@
 /** Shadow-root styles for the injected Overlay client. */
 import { visualBridgeColorTokens } from "./design-tokens.js";
+import { logTextStyles } from "./log-text.js";
 
 export const overlayStyles = String.raw`
+  ${logTextStyles}
   .comparison-request { display: grid; gap: 8px; margin: 10px 0 14px; }
   .comparison-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; }
   .comparison-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--dispatch); }

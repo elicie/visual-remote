@@ -704,12 +704,14 @@ test("viewer preserves full persisted and live multiline logs with older entries
   await expect(logs.getByText("oldest persisted entry", { exact: true })).toHaveCount(0);
   await expect(logs.getByText("repeated persisted entry", { exact: true })).toHaveCount(2);
   const persistedEntry = logs.locator("li").last();
-  await expect(persistedEntry.locator("pre")).not.toContainText("PERSISTED END");
-  await persistedEntry.getByRole("button", { name: "전체 로그 펼치기" }).click();
+  await expect(persistedEntry.locator("pre")).toBeHidden();
+  await persistedEntry.locator(".log-toggle .log-text").click();
   expect(await persistedEntry.locator("pre").textContent()).toBe(longMessage);
   await expect(persistedEntry.locator("pre")).toHaveCSS("white-space", "pre-wrap");
-  await persistedEntry.getByRole("button", { name: "로그 접기" }).click();
-  await expect(persistedEntry.locator("pre")).not.toContainText("PERSISTED END");
+  await persistedEntry.getByRole("button", { name: "로그 접기" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(persistedEntry.locator("pre")).toBeHidden();
+  await expect(persistedEntry.locator(".log-toggle .log-text")).not.toContainText("PERSISTED END");
   await page.getByRole("button", { name: /이전 로그 .*더 보기/ }).click();
   await expect(logs.locator("li")).toHaveCount(persisted.length);
   await expect(logs.getByText("oldest persisted entry", { exact: true })).toBeVisible();
@@ -722,12 +724,153 @@ test("viewer preserves full persisted and live multiline logs with older entries
   await expect(page.locator(".logs-block > header .machine")).toHaveText(String(persisted.length + live.length));
   const liveEntries = logs.locator("li").filter({ hasText: "Claude live output" });
   await expect(liveEntries).toHaveCount(2);
-  await liveEntries.last().getByRole("button", { name: "전체 로그 펼치기" }).click();
+  await liveEntries.last().locator(".log-toggle .log-text").click();
   expect(await liveEntries.last().locator("pre").textContent()).toBe(liveMessage);
   await page.getByRole("button", { name: /이전 로그 .*더 보기/ }).click();
   await expect(logs.locator("li")).toHaveCount(persisted.length + live.length);
   await expect(logs.getByText("oldest persisted entry", { exact: true })).toHaveCount(1);
   await expect(logs.getByText("live entry 0", { exact: true })).toHaveCount(1);
+});
+
+test("overlay expands persisted and live logs by clicking the visible preview", async ({ page }) => {
+  const sessionId = randomUUID();
+  const task = overlayTask("full-overlay-logs", sessionId, "running_agent");
+  const persisted = `  # Stored markdown\n\n${"long persisted output ".repeat(80)}\n  PERSISTED END\n`;
+  const live = `  # Live markdown\n\n${"long live output ".repeat(80)}\n  LIVE END\n`;
+  const socketReady = await routeOverlaySocket(page, sessionId);
+  await page.route("**/_visual/api/tasks", (route) => route.fulfill({ json: [task] }));
+  await page.route("**/_visual/api/tasks/*/logs", (route) => route.fulfill({
+    json: [{ event: { type: "message", message: persisted } }],
+  }));
+  await page.goto(`${fixture.origin}/#visual-pair=${controlToken}`);
+  const logs = page.getByRole("list", { name: "최근 작업 로그" });
+  const storedEntry = logs.locator("li").first();
+  await expect(storedEntry.locator(".log-toggle .log-text")).not.toContainText("PERSISTED END");
+  await storedEntry.locator(".log-toggle .log-text").click();
+  await expect(storedEntry.locator("pre")).toBeVisible();
+  expect(await storedEntry.locator("pre").textContent()).toBe(persisted);
+  await expect(storedEntry.locator("pre")).toHaveCSS("white-space", "pre-wrap");
+  await storedEntry.getByRole("button", { name: "로그 접기" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(storedEntry.locator("pre")).toBeHidden();
+  const socket = await socketReady.connected;
+  socket.send(JSON.stringify({
+    type: "task.agent_output", seq: 1, taskId: task.id,
+    payload: { event: { type: "message", message: live } },
+  }));
+  const liveEntry = logs.locator("li").last();
+  await expect(liveEntry.locator(".log-toggle .log-text")).toContainText("Live markdown");
+  await expect(liveEntry.locator(".log-toggle .log-text")).not.toContainText("LIVE END");
+  await liveEntry.locator(".log-toggle .log-text").click();
+  await expect(liveEntry.locator("pre")).toBeVisible();
+  expect(await liveEntry.locator("pre").textContent()).toBe(live);
+  await expect(liveEntry.locator("pre")).toHaveCSS("white-space", "pre-wrap");
+  await liveEntry.getByRole("button", { name: "로그 접기" }).focus();
+  await page.keyboard.press("Space");
+  await expect(liveEntry.locator("pre")).toBeHidden();
+});
+
+for (const outcome of ["http", "socket", "newer", "error"] as const) {
+  test(`overlay permission approval scopes tools and handles ${outcome} response`, async ({ page }) => {
+    const sessionId = randomUUID();
+    const tools = ["mcp__figma__download_image", "mcp__figma__get_design_context"];
+    const denied = {
+      ...overlayTask("denied-tools", sessionId, "failed"),
+      error: { code: "AGENT_PERMISSION_DENIED", message: "Claude 도구 권한 거부" },
+      permissionDeniedTools: [...tools, "Bash", "mcp__figma__*"],
+    };
+    const retry = overlayTask("approved-retry", sessionId, "queued");
+    const newer = overlayTask("newer-request", sessionId, "running_agent");
+    const socketReady = await routeOverlaySocket(page, sessionId);
+    await page.route("**/_visual/api/tasks", (route) => route.fulfill({ json: [denied] }));
+    const requested = deferred<void>();
+    const release = deferred<void>();
+    let calls = 0;
+    await page.route("**/_visual/api/tasks/denied-tools/approve-tools", async (route) => {
+      calls++;
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().headers().authorization).toBe(`Bearer ${controlToken}`);
+      expect(route.request().postDataJSON()).toEqual({ tools });
+      requested.resolve();
+      await release.promise;
+      await route.fulfill({ status: outcome === "error" ? 409 : 200, json: outcome === "error" ? { message: "승인 재시도 실패" } : retry });
+    });
+    await page.goto(`${fixture.origin}/#visual-pair=${controlToken}`);
+    const socket = await socketReady.connected;
+    const strip = page.locator("#visual-task-strip");
+    const approve = strip.getByRole("button", { name: "해당 MCP 도구 허용 후 재시도", exact: true });
+    await expect(strip.getByRole("list", { name: "재시도에서 허용할 MCP 도구" }).locator("li")).toHaveText(tools);
+    await expect(strip.getByText(/모든 인수의 호출/)).toBeVisible();
+    await approve.click();
+    await requested.promise;
+    await expect(approve).toBeDisabled();
+    expect(calls).toBe(1);
+    if (outcome === "socket" || outcome === "newer") {
+      socket.send(JSON.stringify({ type: "task.queued", seq: 1, taskId: retry.id, payload: retry }));
+      socket.send(JSON.stringify({ type: "task.completed", seq: 2, taskId: retry.id, payload: { ...retry, status: "review" } }));
+      if (outcome === "newer") socket.send(JSON.stringify({ type: "task.queued", seq: 3, taskId: newer.id, payload: newer }));
+      await expect(strip.locator(".phase-mark")).toHaveAttribute("data-state", outcome === "newer" ? "running_agent" : "review");
+    }
+    const response = page.waitForResponse("**/_visual/api/tasks/denied-tools/approve-tools");
+    release.resolve();
+    await (await response).finished();
+    if (outcome === "error") {
+      await expect(strip.getByRole("alert")).toContainText("승인 재시도 실패");
+      await expect(approve).toBeEnabled();
+      await expect(strip.locator(".strip-title")).toHaveText(denied.requestText);
+    } else {
+      const current = outcome === "newer" ? newer : retry;
+      await expect(strip.locator(".strip-title")).toHaveText(current.requestText);
+      socket.send(JSON.stringify({ type: "task.log", seq: 4, taskId: current.id, payload: { message: "retry binding remains current" } }));
+      await expect(strip.locator(".log-summary")).toContainText("retry binding remains current");
+      await expect(strip.locator(".phase-mark")).toHaveAttribute("data-state", outcome === "http" ? "queued" : outcome === "socket" ? "review" : "running_agent");
+      await expect(approve).toHaveCount(0);
+    }
+    expect(calls).toBe(1);
+  });
+}
+
+for (const tools of [[], ["Bash"], ["mcp__figma__*", "mcp__figma__download image"]]) {
+  test(`overlay guides local permissions without approval for ${JSON.stringify(tools)}`, async ({ page }) => {
+    const sessionId = randomUUID();
+    await routeOverlaySocket(page, sessionId);
+    await page.route("**/_visual/api/tasks", (route) => route.fulfill({ json: [{
+      ...overlayTask("non-approvable", sessionId, "failed"),
+      error: { code: "AGENT_PERMISSION_DENIED", message: "도구 권한 거부" },
+      permissionDeniedTools: tools,
+    }] }));
+    await page.goto(`${fixture.origin}/#visual-pair=${controlToken}`);
+    const strip = page.locator("#visual-task-strip");
+    await expect(strip.getByText(/로컬 Claude CLI의 권한 설정을 확인/)).toBeVisible();
+    await expect(strip.getByRole("button", { name: "해당 MCP 도구 허용 후 재시도" })).toHaveCount(0);
+  });
+}
+
+test("viewer shows denied tools without approval mutations", async ({ page }) => {
+  const tool = "mcp__figma__download_image";
+  const denied = {
+    ...overlayTask("viewer-denied", "viewer-denied-session", "failed"),
+    error: { code: "AGENT_PERMISSION_DENIED", message: "Claude 도구 권한 거부" },
+    permissionDeniedTools: [tool],
+  };
+  let approvalCalls = 0;
+  await page.route("**/_visual/bootstrap", (route) => route.fulfill({ json: { authMode: "local", projectId: "browser-fixture" } }));
+  await page.route("**/_visual/api/project", (route) => route.fulfill({ json: { projectId: "browser-fixture" } }));
+  await page.route(/\/_visual\/api\/tasks(?:\?.*)?$/u, (route) => route.fulfill({ json: [denied] }));
+  await page.route("**/_visual/api/tasks/*/files", (route) => route.fulfill({ json: [] }));
+  await page.route("**/_visual/api/tasks/*/logs", (route) => route.fulfill({ json: [] }));
+  await page.route("**/_visual/api/tasks/*/diff", (route) => route.fulfill({ json: { diff: "" } }));
+  await page.route("**/approve-tools", (route) => { approvalCalls++; return route.fulfill({ status: 403 }); });
+  await page.routeWebSocket("**/_visual/ws", (socket) => {
+    socket.onMessage((raw) => {
+      if (JSON.parse(String(raw)).type === "session.open") socket.send(JSON.stringify({ type: "session.ready", projectId: "browser-fixture", payload: { access: "viewer" } }));
+    });
+  });
+  await page.goto(`${fixture.origin}/_visual/viewer`);
+  await expect(page.getByText("Claude 도구 권한 거부", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "거부된 도구", exact: true }).getByText(tool, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "해당 MCP 도구 허용 후 재시도" })).toHaveCount(0);
+  expect(approvalCalls).toBe(0);
 });
 
 async function forbidMediaCapture(page: Page): Promise<void> {

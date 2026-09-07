@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ClaudeAdapter,
+  AgentPermissionDeniedError,
   type AgentRunInput,
   type NormalizedAgentEvent,
 } from "@visual-remote/bridge-core";
@@ -76,12 +77,13 @@ describe("ClaudeAdapter", () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
-  it.each([false, true])("preserves fresh/resume configuration with artifact access %s", async (withArtifacts) => {
+  it.each([[false, false], [true, false], [false, true], [true, true]])("preserves fresh/resume configuration with artifact access %s and approval %s", async (withArtifacts, approved) => {
     const directory = await mkdtemp(resolve(tmpdir(), "visual-claude-test-"));
     const artifactDirectory = resolve(`${directory} artifacts`, "task-test");
     const runInput = {
       ...input(directory),
       ...(withArtifacts ? { artifactDirectory } : {}),
+      ...(approved ? { allowedTools: ["mcp__figma__download", "mcp__figma__get_node"] } : {}),
     };
     try {
       const adapter = new ClaudeAdapter({
@@ -104,6 +106,7 @@ describe("ClaudeAdapter", () => {
       expect(run.args).toEqual([
         "-p", "--output-format", "stream-json", "--verbose",
         ...(withArtifacts ? ["--add-dir", artifactDirectory] : []),
+        ...(approved ? ["--allowedTools", "mcp__figma__download,mcp__figma__get_node"] : []),
         "--model", "sonnet", "--effort", "high",
       ]);
 
@@ -120,6 +123,40 @@ describe("ClaudeAdapter", () => {
     } finally {
       await rm(directory, { recursive: true });
     }
+  });
+
+  it.each(["Bash", "mcp__figma__*", "mcp__figma__download:all", "mcp__figma__download,Edit", "mcp__figma__download Edit", "mcp__figma__download\n", "--dangerously-skip-permissions", ""])(
+    "rejects unscoped allowed tool %j before starting fresh or resumed runs", async (name) => {
+      const adapter = new ClaudeAdapter({ executable: "must-not-start", rtkExecutable: false });
+      const runInput = { ...input(tmpdir()), allowedTools: [name] };
+      const signal = new AbortController().signal;
+      for (const events of [adapter.run(runInput, signal), adapter.resume({ ...runInput, sessionId: "claude-session" }, signal)]) {
+        await expect(events[Symbol.asyncIterator]().next()).rejects.toThrow("Allowed tools must be exact MCP tool names");
+      }
+    },
+  );
+
+  it.each(["system", "result", "unknown"])("terminates a continuing %s denial and throws its permission error", async (kind) => {
+    const directory = await mkdtemp(resolve(tmpdir(), "visual-claude-denial-"));
+    const tool = "mcp__figma__download";
+    const denial = kind === "result"
+      ? { type: "result", subtype: "success", permission_denials: [{ tool_name: tool, tool_input: { token: "secret" } }, { tool_name: "mcp__figma__get_node" }] }
+      : { type: "system", subtype: "permission_denied", ...(kind === "system" ? { tool_name: tool } : {}), message: "secret" };
+    try {
+      const path = resolve(directory, "denied.mjs");
+      await writeFile(path, `#!/usr/bin/env node\nfor await (const chunk of process.stdin) {}\nprocess.stdout.write(${JSON.stringify(`${JSON.stringify(denial)}\n${JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "must not continue" }] } })}\n`)});\nsetInterval(() => {}, 1000);\n`);
+      await chmod(path, 0o755);
+      const adapter = new ClaudeAdapter({ executable: path, rtkExecutable: false, killGraceMs: 20 });
+      const events: NormalizedAgentEvent[] = [];
+      let failure: unknown;
+      try {
+        for await (const event of adapter.run(input(directory), new AbortController().signal)) events.push(event);
+      } catch (error) { failure = error; }
+      expect(failure).toBeInstanceOf(AgentPermissionDeniedError);
+      expect(failure).toMatchObject({ code: "AGENT_PERMISSION_DENIED", tools: kind === "unknown" ? [] : kind === "result" ? [tool, "mcp__figma__get_node"] : [tool] });
+      expect(events).toEqual(kind === "unknown" ? [{ type: "permission_denied" }] : kind === "result" ? [{ type: "permission_denied", toolName: tool }, { type: "permission_denied", toolName: "mcp__figma__get_node" }] : [{ type: "permission_denied", toolName: tool }]);
+      expect(JSON.stringify(events)).not.toContain("secret");
+    } finally { await rm(directory, { recursive: true }); }
   });
 
   it.each(["", "relative/artifacts", parse(tmpdir()).root, `${parse(tmpdir()).root}tmp/..`])(

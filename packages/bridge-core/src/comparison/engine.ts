@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AgentPermissionDeniedError } from "../agents/types.js";
 import type {
   CaptureResult,
   ComparisonState,
@@ -105,12 +106,18 @@ export async function runDesignComparison(
       `COMPARISON_PHASE=REFERENCE_ONLY\nCOMPARISON_ARTIFACT_DIRECTORY=${directory}\nRetrieve ${request.url} (file ${identity.fileKey}, node ${identity.nodeId}) using ONLY the user's existing configured Figma MCP. Read ${directory}/instructions.txt. This phase is read-only for the application: DO NOT implement, edit code, launch servers, install dependencies or execute the implementation request yet. The ONLY write exception outside the normal repository is the designated private artifact directory above. Write actual exported reference.png and reference.json matching instructions.txt there (0600). Include sourceUrl and nodeId provenance and every visible text node's real rendered geometry and CSS-equivalent typography/color. Never fabricate image, metadata or scores. If inaccessible/incomplete, explain the prerequisite and leave reference absent.\n${mimikyuSkill}`,
     );
     options.signal.throwIfAborted();
-    const referenceBytes = await readPrivate(directory, "reference.png"),
-      metadataBytes = await readPrivate(
-        directory,
-        "reference.json",
-        4 * 1024 * 1024,
-      );
+    const readReference = async (name: string, maxBytes?: number): Promise<Buffer> => {
+      try {
+        return await readPrivate(directory, name, maxBytes);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new Error(`Figma reference retrieval did not produce ${name}. Check the agent output and configured Figma MCP before retrying.`);
+        }
+        throw error;
+      }
+    };
+    const referenceBytes = await readReference("reference.png"),
+      metadataBytes = await readReference("reference.json", 4 * 1024 * 1024);
     const metadata = JSON.parse(metadataBytes.toString("utf8")) as {
       width: number;
       height: number;
@@ -302,6 +309,7 @@ export async function runDesignComparison(
           ? error.message
           : "Comparison failed without usable evidence",
     );
+    if (error instanceof AgentPermissionDeniedError) throw error;
     return state;
   }
 }

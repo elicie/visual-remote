@@ -28,6 +28,7 @@ export interface ControlService {
   getTaskFiles?(taskId: string): Awaitable<unknown | undefined>;
   getTaskLogs?(taskId: string): Awaitable<unknown | undefined>;
   cancelTask?(taskId: string): Awaitable<unknown | undefined>;
+  approveTaskTools?(taskId: string, payload: unknown): Awaitable<unknown>;
   acceptTask?(taskId: string): Awaitable<unknown | undefined>;
   revertTask?(taskId: string): Awaitable<unknown | undefined>;
   getArtifact?(artifactId: string): Awaitable<ControlArtifact | undefined>;

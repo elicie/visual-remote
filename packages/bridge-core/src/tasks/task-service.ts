@@ -4,6 +4,7 @@ import { relative, resolve, sep } from "node:path";
 
 import {
   AgentCanceledError,
+  AgentPermissionDeniedError,
   AgentProcessError,
   AgentTimeoutError,
   type AgentAdapter,
@@ -101,6 +102,7 @@ function publicTask(task: StoredTask): TaskRecord {
   if (task.verificationStatus) result.verificationStatus = task.verificationStatus;
   if (task.comparison) result.comparison = structuredClone(task.comparison);
   if (task.error) result.error = { ...task.error };
+  if (task.permissionDeniedTools) result.permissionDeniedTools = [...task.permissionDeniedTools];
   if (task.startedAt) result.startedAt = task.startedAt;
   if (task.completedAt) result.completedAt = task.completedAt;
   return result;
@@ -108,6 +110,9 @@ function publicTask(task: StoredTask): TaskRecord {
 
 function errorInfo(error: unknown): { code: string; message: string } {
   if (error instanceof TaskServiceError || error instanceof RepositorySafetyError) {
+    return { code: error.code, message: redactSecrets(error.message) };
+  }
+  if (error instanceof AgentPermissionDeniedError) {
     return { code: error.code, message: redactSecrets(error.message) };
   }
   if (error instanceof AgentTimeoutError) {
@@ -214,6 +219,27 @@ export class TaskService {
   }
 
   create(contextInput: ContextBundle, options: CreateTaskOptions = {}): TaskRecord {
+    return this.#create(contextInput, options);
+  }
+
+  approveToolsAndRetry(taskId: string, tools: string[]): TaskRecord {
+    const task = this.#requireTask(taskId);
+    if (task.status !== "failed" || task.error?.code !== "AGENT_PERMISSION_DENIED") {
+      throw new TaskServiceError("TASK_NOT_APPROVABLE", "Only a permission-denied failed task can be retried with tool approval");
+    }
+    if (task.agentAdapter !== "claude" || this.#adapter.id !== "claude") {
+      throw new TaskServiceError("INVALID_TOOL_APPROVAL", "Tool approval retries require the Claude adapter");
+    }
+    const observed = new Set(task.permissionDeniedTools ?? []);
+    if (!Array.isArray(tools) || tools.length === 0 || new Set(tools).size !== tools.length ||
+        tools.some((tool) => typeof tool !== "string" || tool.trim() !== tool || !/^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/.test(tool) || !observed.has(tool))) {
+      throw new TaskServiceError("INVALID_TOOL_APPROVAL", "Approve only exact MCP tool names denied by this task; built-in tools require local Claude permission settings");
+    }
+    const approvedTools = [...new Set([...(task.approvedTools ?? []), ...tools])];
+    return this.#create(structuredClone(task.contextBundle), { parentTaskId: task.id }, approvedTools);
+  }
+
+  #create(contextInput: ContextBundle, options: CreateTaskOptions, approvedTools?: string[]): TaskRecord {
     if (this.#closed) throw new TaskServiceError("SERVICE_CLOSED", "Task service is closed");
     if (this.#queue.length >= this.#maxPending) {
       throw new TaskServiceError(
@@ -257,6 +283,7 @@ export class TaskService {
       threshold: context.request.comparison.threshold, targetMatch: context.request.comparison.targetMatch,
     };
     if (options.parentTaskId) task.parentTaskId = options.parentTaskId;
+    if (approvedTools) task.approvedTools = [...approvedTools];
     this.#store.createTask(task);
     this.#queue.push(task.id);
     this.#emit("task.queued", { task: publicTask(task) }, task.id);
@@ -699,7 +726,8 @@ export class TaskService {
       };
       const task = this.#requireTask(taskId);
       const parentTask = task.parentTaskId ? this.#store.getTask(task.parentTaskId) : undefined;
-      let sessionId = this.#resumeMode === "auto" ? parentTask?.agentSessionId : undefined;
+      if (task.approvedTools) input.allowedTools = [...task.approvedTools];
+      let sessionId = this.#resumeMode === "auto" && !task.approvedTools && !parentTask?.approvedTools ? parentTask?.agentSessionId : undefined;
       const runAgent = async (agentPrompt: string): Promise<void> => {
         controller.signal.throwIfAborted();
         const runInput = { ...input, prompt: agentPrompt, maxRunMs: Math.max(1, deadline - Date.now()) };
@@ -707,6 +735,8 @@ export class TaskService {
           ? this.#adapter.resume({ ...runInput, sessionId } satisfies AgentResumeInput, controller.signal)
           : this.#adapter.run(runInput, controller.signal);
         for await (const event of stream) this.#recordAgentEvent(taskId, event);
+        const deniedTools = this.#requireTask(taskId).permissionDeniedTools;
+        if (deniedTools) throw new AgentPermissionDeniedError(deniedTools);
         sessionId = this.#requireTask(taskId).agentSessionId;
         controller.signal.throwIfAborted();
       };
@@ -740,6 +770,10 @@ export class TaskService {
       this.#throwIfCanceled(taskId);
     } catch (error) {
       failure = timedOut ? new AgentTimeoutError() : error;
+      if (failure instanceof AgentPermissionDeniedError) {
+        const observed = this.#requireTask(taskId).permissionDeniedTools ?? [];
+        this.#store.updateTask(taskId, { permissionDeniedTools: [...new Set([...observed, ...failure.tools])] });
+      }
       const normalized = errorInfo(failure);
       const comparison = this.#requireTask(taskId).comparison;
       if (comparison) this.#recordComparison(taskId, { ...comparison, status: this.#cancelRequested.has(taskId) ? "canceled" : "blocked", message: normalized.message });
@@ -886,6 +920,12 @@ export class TaskService {
     this.#store.appendLog(taskId, sanitized, this.#now().toISOString());
     if (sanitized.type === "session") {
       this.#store.updateTask(taskId, { agentSessionId: sanitized.sessionId });
+    }
+    if (sanitized.type === "permission_denied") {
+      const observed = this.#requireTask(taskId).permissionDeniedTools ?? [];
+      this.#store.updateTask(taskId, {
+        permissionDeniedTools: sanitized.toolName ? [...new Set([...observed, sanitized.toolName])] : observed,
+      });
     }
     this.#emit("task.agent_output", { event: sanitized }, taskId);
   }

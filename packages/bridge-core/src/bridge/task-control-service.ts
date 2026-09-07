@@ -111,6 +111,7 @@ function translateError(error: unknown): never {
           || error.code === "NOT_LATEST_TASK"
           || error.code === "TASK_NOT_ACCEPTABLE"
           || error.code === "TASK_NOT_REVERTIBLE"
+          || error.code === "TASK_NOT_APPROVABLE"
           ? 409
           : 400;
     throw new ControlServiceError(statusCode, error.code.toLowerCase(), error.message);
@@ -684,6 +685,13 @@ export function createTaskControlService(
     getTaskLogs: (taskId) => taskAction(() => ({ logs: taskService.logs(taskId) })),
     getArtifact: (artifactId) => taskService.getArtifact(artifactId),
     cancelTask: (taskId) => taskAction(() => taskService.cancel(taskId)),
+    approveTaskTools: (taskId, payload) => taskAction(() => {
+      const record = recordOf(payload);
+      if (!record || Object.keys(record).length !== 1 || !Array.isArray(record.tools) || record.tools.some((tool) => typeof tool !== "string")) {
+        throw new ControlServiceError(400, "invalid_tool_approval", "Expected { tools: string[] }");
+      }
+      return taskService.approveToolsAndRetry(taskId, record.tools as string[]);
+    }),
     acceptTask: (taskId) => taskAction(() => taskService.accept(taskId)),
     revertTask: async (taskId) => {
       try {

@@ -29,14 +29,13 @@ import {
 import { compactText } from "./helpers.js";
 import { viewerStyles } from "./viewer-styles.js";
 import { ComparisonPanel } from "./comparison-panel.js";
+import { LogText } from "./log-text.js";
 
 type TaskFilter = "all" | "active" | "review" | "issue";
 const TASK_PAGE_SIZE = 100;
 const TASK_FETCH_SIZE = TASK_PAGE_SIZE + 1;
 const DIFF_PREVIEW_CHARACTERS = 60_000;
 const LOG_PAGE_SIZE = 40;
-const LOG_PREVIEW_CHARACTERS = 600;
-const LOG_PREVIEW_LINES = 6;
 
 interface DetailState extends TaskArtifacts {
   taskId: string;
@@ -202,27 +201,10 @@ function isAbortError(error: unknown): boolean {
 }
 
 function LogEntry({ text, index }: { text: string; index: number }) {
-  const [expanded, setExpanded] = useState(false);
-  const preview = text.slice(0, LOG_PREVIEW_CHARACTERS).split("\n").slice(0, LOG_PREVIEW_LINES).join("\n");
-  const isLong = preview.length < text.length;
-  const contentId = `log-content-${index}`;
   return (
     <li>
       <span class="machine">{String(index + 1).padStart(2, "0")}</span>
-      <div class="log-entry">
-        <pre id={contentId}>{isLong && !expanded ? `${preview}\n…` : text}</pre>
-        {isLong ? (
-          <button
-            type="button"
-            class="log-toggle"
-            aria-expanded={expanded ? "true" : "false"}
-            aria-controls={contentId}
-            onClick={() => setExpanded(!expanded)}
-          >
-            {expanded ? "로그 접기" : "전체 로그 펼치기"}
-          </button>
-        ) : null}
-      </div>
+      <LogText text={text} />
     </li>
   );
 }
@@ -313,7 +295,7 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
             },
       );
       try {
-        const artifacts = await fetchTaskArtifacts(token, task.id, controller.signal, { ...requestOptions, logFormat: "full" });
+        const artifacts = await fetchTaskArtifacts(token, task.id, controller.signal, { ...requestOptions, logHistory: "all" });
         setDetail((current) =>
           current?.taskId === task.id && !controller.signal.aborted
             ? { taskId: task.id, loading: false, ...artifacts }
@@ -355,7 +337,7 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
       const taskId = event.taskId ?? eventTask?.id;
       if (!taskId || selectedIdRef.current !== taskId) return;
 
-      const log = logFromEvent(event, "full");
+      const log = logFromEvent(event);
       const files = changedFilesFromEvent(event);
       if (log || files.length > 0) {
         setDetail((current) =>
@@ -818,6 +800,15 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
                   ) : null}
 
                   {selectedTask.comparison ? <ComparisonPanel key={selectedTask.id} state={selectedTask.comparison} token={token} options={requestOptions} /> : null}
+                  {selectedTask.status === "failed" && selectedTask.error?.code === "AGENT_PERMISSION_DENIED" ? (
+                    <section class="files-block" aria-label="거부된 도구">
+                      <h3>거부된 도구</h3>
+                      {selectedTask.permissionDeniedTools?.length ? (
+                        <ul>{selectedTask.permissionDeniedTools.map((tool) => <li key={tool}><code style={{ overflowWrap: "anywhere" }}>{tool}</code></li>)}</ul>
+                      ) : <p>거부된 도구 이름을 확인할 수 없습니다.</p>}
+                      <p>읽기 전용 보드에서는 권한을 변경할 수 없습니다. 제어 화면에서 해당 MCP 도구의 재시도를 허용하거나 로컬 Claude CLI의 권한 설정을 확인하세요. 명시적 거부·관리자 정책은 계속 적용됩니다.</p>
+                    </section>
+                  ) : null}
                   <section class="files-block" aria-labelledby="files-title">
                     <header>
                       <h3 id="files-title">변경 파일</h3>

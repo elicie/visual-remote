@@ -606,8 +606,6 @@ function commandLogLine(event: Record<string, unknown>): string | null {
   return `${runtime} · ${command}${metadata.length > 0 ? ` · ${metadata.join(" · ")}` : ""}`;
 }
 
-type LogFormat = "compact" | "full";
-
 function logTextFromValue(value: unknown): string | null {
   if (typeof value === "string") {
     return value;
@@ -620,6 +618,11 @@ function logTextFromValue(value: unknown): string | null {
   const type = typeof event.type === "string" ? event.type : undefined;
   if (type === "command") {
     return commandLogLine(event);
+  }
+  if (type === "permission_denied") {
+    return typeof event.toolName === "string"
+      ? `도구 권한 거부 · ${event.toolName}`
+      : "도구 권한 거부 · 도구 이름을 확인할 수 없습니다.";
   }
   if (type === "tool_start" && typeof event.name === "string") {
     if (event.name === "command_execution" || event.name === "direct_exec") return null;
@@ -658,16 +661,11 @@ function logTextFromValue(value: unknown): string | null {
   return typeof message === "string" ? message : null;
 }
 
-function logLineFromValue(value: unknown, format: LogFormat): string | null {
-  const text = logTextFromValue(value);
-  return text === null || format === "full" ? text : compactText(text, 500);
-}
-
 export async function fetchTaskArtifacts(
   token: string,
   taskId: string,
   signal?: AbortSignal,
-  options: BridgeRequestOptions & { logFormat?: LogFormat } = {},
+  options: BridgeRequestOptions & { logHistory?: "recent" | "all" } = {},
 ): Promise<TaskArtifacts> {
   const base = `/_visual/api/tasks/${encodeURIComponent(taskId)}`;
   const requestInit = signal === undefined ? undefined : { signal };
@@ -696,9 +694,9 @@ export async function fetchTaskArtifacts(
       ? logsRecord.logs
       : [];
   const formattedLogs = logEntries
-    .map((entry) => logLineFromValue(entry, options.logFormat ?? "compact"))
+    .map(logTextFromValue)
     .filter((line): line is string => line !== null && line.length > 0);
-  const logs = options.logFormat === "full" ? formattedLogs : formattedLogs.slice(-40);
+  const logs = options.logHistory === "all" ? formattedLogs : formattedLogs.slice(-40);
 
   const unavailable: TaskArtifacts["unavailable"] = [];
   if (filesResult.status === "rejected") unavailable.push("files");
@@ -720,6 +718,24 @@ export async function postTaskAction(
       { method: "POST" },
     ),
   );
+}
+
+export async function approveTaskTools(
+  token: string,
+  taskId: string,
+  tools: string[],
+  options: BridgeRequestOptions = {},
+): Promise<TaskRecord> {
+  const value = recordOf(await responseValue(await authorizedFetch(
+    token,
+    `/_visual/api/tasks/${encodeURIComponent(taskId)}/approve-tools`,
+    { method: "POST", body: JSON.stringify({ tools }) },
+    options,
+  )));
+  if (!value || typeof value.id !== "string" || !VALID_TASK_STATUSES.has(value.status as TaskStatus)) {
+    throw new Error("재시도 작업 응답을 확인하지 못했습니다. 작업 보드를 확인하세요.");
+  }
+  return value as unknown as TaskRecord;
 }
 
 export function taskFromEvent(event: ServerEvent): TaskRecord | undefined {
@@ -766,9 +782,9 @@ export function phaseFromEvent(event: ServerEvent): TaskStatus | undefined {
   return typeof phase === "string" ? (phase as TaskStatus) : undefined;
 }
 
-export function logFromEvent(event: ServerEvent, format: LogFormat = "compact"): string | null {
+export function logFromEvent(event: ServerEvent): string | null {
   const payload = recordOf(event.payload);
-  return logLineFromValue(payload?.event ?? payload, format);
+  return logTextFromValue(payload?.event ?? payload);
 }
 
 export function changedFilesFromEvent(event: ServerEvent): string[] {

@@ -90,6 +90,26 @@ function context(projectId: string): ContextBundle {
 }
 
 describe("task control service", () => {
+  it("validates approval payloads and returns a new scoped task without exposing approvals", async () => {
+    const repoRoot = await repositoryFixture();
+    const tool = "mcp__figma__download_image";
+    const fake = new FakeAgentAdapter((input) => input.allowedTools ? [{ type: "complete" }] : [{ type: "permission_denied", toolName: tool }]);
+    const taskService = new TaskService({ projectId: "fixture", adapter: { id: "claude", probe: fake.probe.bind(fake), run: fake.run.bind(fake) }, store: new SqliteTaskStore(":memory:"), git: await GitTransactionManager.open(repoRoot) });
+    const control = createTaskControlService({ taskService, hmrWaitMs: 0, project: { id: "fixture", repoRoot, workspaceRoot: repoRoot, mode: "attach", upstreamUrl: "http://localhost:10002" } });
+    const task = await control.createTask!({ contextBundle: context("fixture"), approvedTools: [tool] }) as TaskRecord;
+    await taskService.waitForIdle();
+    expect(fake.runs[0]?.input.allowedTools).toBeUndefined();
+    for (const payload of [null, {}, { tools: "bad" }, { tools: [1] }, { tools: [tool], extra: true }, { tools: [] }, { tools: ["Bash"] }, { tools: ["mcp__figma__*"] }, { tools: ["mcp__other__unobserved"] }]) {
+      expect(() => control.approveTaskTools!(task.id, payload)).toThrow();
+    }
+    const retry = await control.approveTaskTools!(task.id, { tools: [tool] }) as TaskRecord;
+    expect(retry).toMatchObject({ parentTaskId: task.id, status: "queued" });
+    expect(retry.id).not.toBe(task.id);
+    expect(retry).not.toHaveProperty("approvedTools");
+    await taskService.waitForIdle();
+    expect(fake.runs[1]?.input.allowedTools).toEqual([tool]);
+    await control.close?.();
+  });
   it("opens only validated verification contexts and rejects oversized websocket messages", async () => {
     const repoRoot = await repositoryFixture();
     const taskService = new TaskService({ projectId: "fixture", adapter: new FakeAgentAdapter(), store: new SqliteTaskStore(":memory:"), git: await GitTransactionManager.open(repoRoot) });

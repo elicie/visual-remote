@@ -76,6 +76,11 @@ export class ClaudeEventParser {
     const type = asText(record.type) ?? "unknown";
     if (type === "system") {
       const subtype = asText(record.subtype);
+      if (subtype === "permission_denied") {
+        const toolName = asText(record.tool_name);
+        events.push(toolName ? { type: "permission_denied", toolName } : { type: "permission_denied" });
+        return events;
+      }
       if (subtype) events.push({ type: "phase", name: subtype });
       return events;
     }
@@ -122,6 +127,13 @@ export class ClaudeEventParser {
     }
 
     if (type === "result") {
+      if (Array.isArray(record.permission_denials) && record.permission_denials.length > 0) {
+        for (const denial of record.permission_denials) {
+          const toolName = asText(asRecord(denial)?.tool_name);
+          events.push(toolName ? { type: "permission_denied", toolName } : { type: "permission_denied" });
+        }
+        return events;
+      }
       const usage = asRecord(record.usage);
       if (usage) {
         const cachedInputTokens = asNumber(usage.cache_read_input_tokens);

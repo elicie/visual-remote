@@ -28,6 +28,7 @@ import type {
 import { normalizeComparisonRequest, type ComparisonRequest } from "@visual-remote/protocol";
 import {
   BridgeConnection,
+  approveTaskTools,
   changedFilesFromEvent,
   consumePairingToken,
   createTaskPayload,
@@ -47,6 +48,7 @@ import {
   type ConnectionSnapshot,
   type ConnectionState,
 } from "./bridge.js";
+import { LogText } from "./log-text.js";
 import {
   collectPageElements,
   collectRegionElements,
@@ -87,6 +89,8 @@ interface TaskView {
   diff: string;
   verification?: string;
   error?: string;
+  errorCode?: string;
+  permissionDeniedTools?: string[];
   unavailableArtifacts?: Array<"files" | "diff" | "logs">;
 }
 
@@ -141,6 +145,11 @@ const ACTIVE_PHASES = new Set<TaskStatus>([
 const ERROR_PHASES = new Set<TaskStatus>(["failed", "unsafe"]);
 
 const TASK_HYDRATION_TIMEOUT_MS = 3_000;
+
+function eligibleDeniedTools(task: TaskView): string[] {
+  if (task.status !== "failed" || task.errorCode !== "AGENT_PERMISSION_DENIED") return [];
+  return [...new Set(task.permissionDeniedTools?.filter((tool) => tool.trim() === tool && /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/.test(tool)) ?? [])];
+}
 
 function eventIsFromOverlay(event: Event): boolean {
   return event.composedPath().some(
@@ -412,6 +421,7 @@ function TaskStrip({
   onCancel,
   onAccept,
   onRevert,
+  onApproveTools,
   onToggleFollowUp,
   onFollowUpText,
   onFollowUp,
@@ -428,6 +438,7 @@ function TaskStrip({
   onCancel: () => void;
   onAccept: () => void;
   onRevert: () => void;
+  onApproveTools: () => void;
   onToggleFollowUp: () => void;
   onFollowUpText: (value: string) => void;
   onFollowUp: () => void;
@@ -457,6 +468,8 @@ function TaskStrip({
         ? "complete"
         : "active";
   const summaryLogs = task.logs.slice(-4);
+  const deniedTools = eligibleDeniedTools(task);
+  const permissionDenied = task.status === "failed" && task.errorCode === "AGENT_PERMISSION_DENIED";
 
   const handleFollowUpKey = (
     event: JSX.TargetedKeyboardEvent<HTMLTextAreaElement>,
@@ -501,7 +514,7 @@ function TaskStrip({
           />
           <span class="phase-copy">
             <strong>{PHASE_LABELS[task.status]}</strong>
-            <span>{task.logs.at(-1) ?? "Bridge에서 작업 상태를 기다리는 중입니다."}</span>
+            <span>{compactText(task.logs.at(-1) ?? "Bridge에서 작업 상태를 기다리는 중입니다.", 180)}</span>
           </span>
           <span class="phase-count machine">{task.changedFiles.length} files</span>
         </div>
@@ -516,7 +529,7 @@ function TaskStrip({
         {summaryLogs.length > 0 ? (
           <ul class="log-summary" aria-label="최근 작업 로그">
             {summaryLogs.map((log, index) => (
-              <li key={`${index}-${log}`}>{log}</li>
+              <li key={`${task.id}-${index}-${log}`}><LogText text={log} compact /></li>
             ))}
           </ul>
         ) : (
@@ -526,6 +539,31 @@ function TaskStrip({
         {task.error ? (
           <div class="error-banner" role="alert">
             오류: {task.error}
+          </div>
+        ) : null}
+
+        {permissionDenied ? (
+          <div class="review-summary">
+            <strong>도구 사용 권한이 거부되었습니다.</strong>
+            {task.permissionDeniedTools?.length ? (
+              <ul class="file-list" aria-label="거부된 도구">
+                {task.permissionDeniedTools.map((tool) => <li key={tool}>{tool}</li>)}
+              </ul>
+            ) : null}
+            {deniedTools.length > 0 ? (
+              <>
+                <p class="empty-line">아래 MCP 도구만 이 재시도 작업 동안 모든 인수의 호출을 허용합니다. 전역 설정은 바꾸지 않으며, 기존 명시적 거부·관리자 정책은 계속 차단할 수 있습니다.</p>
+                <ul class="file-list" aria-label="재시도에서 허용할 MCP 도구">
+                  {deniedTools.map((tool) => <li key={tool}>{tool}</li>)}
+                </ul>
+                <button type="button" class="primary" disabled={!task.id || busyAction} onClick={onApproveTools}>
+                  해당 MCP 도구 허용 후 재시도
+                </button>
+              </>
+            ) : null}
+            {deniedTools.length === 0 || deniedTools.length !== task.permissionDeniedTools?.length ? (
+              <p class="empty-line">기본 도구·알 수 없는 도구는 여기서 허용할 수 없습니다. 로컬 Claude CLI의 권한 설정을 확인한 뒤 새 요청을 보내세요.</p>
+            ) : null}
           </div>
         ) : null}
 
@@ -930,8 +968,12 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
           const error =
             record?.error?.message ??
             ((event.payload as { error?: { message?: unknown } })?.error?.message);
+          const { error: priorError, errorCode: priorErrorCode, permissionDeniedTools: priorDeniedTools, ...base } = next;
           return {
-            ...next,
+            ...base,
+            ...(!record && priorError !== undefined ? { error: priorError } : {}),
+            ...(!record && priorErrorCode !== undefined ? { errorCode: priorErrorCode } : {}),
+            ...(!record && priorDeniedTools !== undefined ? { permissionDeniedTools: priorDeniedTools } : {}),
             ...(eventTaskId ? { id: eventTaskId } : {}),
             status: phase ?? record?.status ?? next.status,
             requestText: record?.requestText ?? next.requestText,
@@ -947,6 +989,8 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
               ? { verification: record.verificationStatus }
               : {}),
             ...(typeof error === "string" ? { error } : {}),
+            ...(record?.error?.code ? { errorCode: record.error.code } : {}),
+            ...(record?.permissionDeniedTools ? { permissionDeniedTools: record.permissionDeniedTools } : {}),
           };
         });
       }
@@ -1042,6 +1086,8 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
             logs: [],
             diff: "",
             ...(latestTask.comparison ? { comparison: latestTask.comparison } : {}),
+            ...(latestTask.error?.code ? { errorCode: latestTask.error.code } : {}),
+            ...(latestTask.permissionDeniedTools ? { permissionDeniedTools: latestTask.permissionDeniedTools } : {}),
             ...(latestTask.verificationStatus
               ? { verification: latestTask.verificationStatus }
               : {}),
@@ -1693,6 +1739,48 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
     [task?.id, token],
   );
 
+  const approveToolsAndRetry = useCallback(async () => {
+    if (!task?.id || pendingActionRef.current?.taskId === task.id) return;
+    const tools = eligibleDeniedTools(task);
+    if (tools.length === 0) return;
+    const request = { taskId: task.id };
+    pendingActionRef.current = request;
+    setPendingAction(request);
+    try {
+      const retry = await approveTaskTools(token, request.taskId, tools, { authMode });
+      if (!mountedRef.current || pendingActionRef.current !== request) return;
+      // The socket may already have bound and advanced the retry or a newer task.
+      // Only replace the denied task; never replay a stale HTTP snapshot over it.
+      setTask((current) => {
+        if (current?.id !== request.taskId) return current;
+        activeTaskIdRef.current = retry.id;
+        return {
+          id: retry.id,
+          status: retry.status,
+          requestText: retry.requestText,
+          changedFiles: retry.changedFiles,
+          logs: [],
+          diff: "",
+          ...(retry.comparison ? { comparison: retry.comparison } : {}),
+          ...(retry.verificationStatus ? { verification: retry.verificationStatus } : {}),
+          ...(retry.error?.message ? { error: retry.error.message } : {}),
+          ...(retry.error?.code ? { errorCode: retry.error.code } : {}),
+          ...(retry.permissionDeniedTools ? { permissionDeniedTools: retry.permissionDeniedTools } : {}),
+        };
+      });
+    } catch (error) {
+      if (!mountedRef.current || pendingActionRef.current !== request) return;
+      setTask((current) => current?.id === request.taskId
+        ? { ...current, error: error instanceof Error ? error.message : "도구 허용 후 재시도를 시작하지 못했습니다." }
+        : current);
+    } finally {
+      if (pendingActionRef.current === request) {
+        pendingActionRef.current = null;
+        if (mountedRef.current) setPendingAction((current) => current === request ? null : current);
+      }
+    }
+  }, [task, token, authMode]);
+
   const submitFollowUp = useCallback(async () => {
     if (!task?.id || !followUpText.trim()) {
       return;
@@ -1968,6 +2056,7 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
           onCancel={() => void runTaskAction("cancel")}
           onAccept={() => void runTaskAction("accept")}
           onRevert={() => void runTaskAction("revert")}
+          onApproveTools={() => void approveToolsAndRetry()}
           onToggleFollowUp={() => setFollowUpOpen((value) => !value)}
           onFollowUpText={setFollowUpText}
           onFollowUp={() => void submitFollowUp()}

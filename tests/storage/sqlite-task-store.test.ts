@@ -37,6 +37,27 @@ function storedTask(): StoredTask {
 }
 
 describe("SqliteTaskStore", () => {
+  it("migrates and persists denied tools and private queued approvals", async () => {
+    const fixture = await createFixtureRepository();
+    const database = resolve(fixture.parent, "permissions.sqlite");
+    let store = new SqliteTaskStore(database);
+    store.createTask(storedTask());
+    store.close();
+    const legacy = new DatabaseSync(database);
+    legacy.exec("ALTER TABLE tasks DROP COLUMN permission_denied_tools_json; ALTER TABLE tasks DROP COLUMN approved_tools_json");
+    legacy.close();
+    store = new SqliteTaskStore(database);
+    expect(store.getTask("persisted-task")?.permissionDeniedTools).toBeUndefined();
+    expect(store.getTask("persisted-task")?.approvedTools).toBeUndefined();
+    store.updateTask("persisted-task", { permissionDeniedTools: ["mcp__figma__download_image"], approvedTools: ["mcp__figma__get_frame"] });
+    store.createTask({ ...storedTask(), id: "queued-retry", approvedTools: ["mcp__figma__download_image"] });
+    store.close();
+    store = new SqliteTaskStore(database);
+    expect(store.getTask("persisted-task")).toMatchObject({ permissionDeniedTools: ["mcp__figma__download_image"], approvedTools: ["mcp__figma__get_frame"] });
+    expect(store.getTask("queued-retry")?.approvedTools).toEqual(["mcp__figma__download_image"]);
+    store.close();
+    await rm(fixture.parent, { recursive: true });
+  });
   it("migrates and persists comparison state without altering ordinary tasks", async () => {
     const fixture = await createFixtureRepository();
     const database = resolve(fixture.parent, "comparison.sqlite");

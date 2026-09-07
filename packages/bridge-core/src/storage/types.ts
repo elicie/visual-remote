@@ -9,6 +9,7 @@ import type { NormalizedAgentEvent } from "../agents/types.js";
 export interface StoredTask extends TaskRecord {
   agentAdapter: string;
   contextBundle: ContextBundle;
+  approvedTools?: string[];
   preHead?: string;
   preIndexTree?: string;
   preRestrictedFingerprint?: string;

@@ -10,6 +10,7 @@ import { AsyncQueue } from "./async-queue.js";
 import { ClaudeEventParser } from "./claude-event-parser.js";
 import {
   AgentCanceledError,
+  AgentPermissionDeniedError,
   AgentProcessError,
   AgentTimeoutError,
   type AgentAdapter,
@@ -127,12 +128,18 @@ export class ClaudeAdapter implements AgentAdapter {
       && (!isAbsolute(directory) || resolve(directory) === parse(directory).root)) {
       throw new Error("Artifact directory must be an absolute non-root path");
     }
+    if (input.allowedTools !== undefined && (!Array.isArray(input.allowedTools)
+      || input.allowedTools.some((name) => typeof name !== "string" || name.trim() !== name
+        || !/^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/.test(name)))) {
+      throw new Error("Allowed tools must be exact MCP tool names");
+    }
     return [
       "-p",
       "--output-format",
       "stream-json",
       "--verbose",
       ...(directory === undefined ? [] : ["--add-dir", directory]),
+      ...(input.allowedTools?.length ? ["--allowedTools", input.allowedTools.join(",")] : []),
       ...(this.#model === undefined ? [] : ["--model", this.#model]),
       ...(this.#reasoningEffort === undefined
         ? []
@@ -210,6 +217,8 @@ export class ClaudeAdapter implements AgentAdapter {
     let timedOut = false;
     let aborted = signal.aborted;
     let termination: Promise<void> | undefined;
+    let permissionDenied = false;
+    const deniedTools = new Set<string>();
     const requestTermination = (): Promise<void> => {
       termination ??= terminateChildProcessTree(
         child,
@@ -230,14 +239,23 @@ export class ClaudeAdapter implements AgentAdapter {
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
 
+    const parseLine = (line: string): void => {
+      for (const event of parser.parse(line)) {
+        if (event.type === "permission_denied") {
+          permissionDenied = true;
+          if (event.toolName) deniedTools.add(event.toolName);
+          queue.push(event);
+          clearTimeout(timeout);
+          void requestTermination();
+        } else if (!permissionDenied) queue.push(event);
+      }
+    };
     child.stdout.on("data", (chunk: Buffer | string) => {
-      stdoutRemainder = splitLines(chunk, stdoutRemainder, (line) => {
-        for (const event of parser.parse(line)) queue.push(event);
-      });
+      stdoutRemainder = splitLines(chunk, stdoutRemainder, parseLine);
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
       stderrRemainder = splitLines(chunk, stderrRemainder, (line) => {
-        if (line.trim()) queue.push({ type: "warning", text: line });
+        if (!permissionDenied && line.trim()) queue.push({ type: "warning", text: line });
       });
     });
     child.once("error", (error) => queue.end(error));
@@ -247,11 +265,12 @@ export class ClaudeAdapter implements AgentAdapter {
       void (async () => {
         await requestTermination();
         if (stdoutRemainder.trim()) {
-          for (const event of parser.parse(stdoutRemainder)) queue.push(event);
+          parseLine(stdoutRemainder);
         }
-        if (stderrRemainder.trim()) queue.push({ type: "warning", text: stderrRemainder });
+        if (!permissionDenied && stderrRemainder.trim()) queue.push({ type: "warning", text: stderrRemainder });
         if (timedOut) queue.end(new AgentTimeoutError());
         else if (aborted) queue.end(new AgentCanceledError());
+        else if (permissionDenied) queue.end(new AgentPermissionDeniedError([...deniedTools]));
         else if (code !== 0) {
           queue.end(
             new AgentProcessError(

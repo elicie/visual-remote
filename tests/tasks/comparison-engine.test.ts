@@ -6,6 +6,7 @@ import type * as PngModule from "pngjs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ContextBundle, ComparisonMeasuredTarget } from "@visual-remote/protocol";
 import { runDesignComparison, getComparisonArtifact } from "../../packages/bridge-core/src/comparison/engine.js";
+import { AgentPermissionDeniedError } from "../../packages/bridge-core/src/agents/types.js";
 import { comparePixels, compareStructure, decodePng } from "../../packages/bridge-core/src/comparison/metrics.js";
 const { PNG } = createRequire(new URL("../../packages/bridge-core/package.json", import.meta.url))("pngjs") as typeof PngModule;
 const roots:string[]=[];
@@ -16,6 +17,30 @@ const target:ComparisonMeasuredTarget={text:"Hello world",rect:{x:0,y:0,width:8,
 function context():ContextBundle{return {version:1,projectId:"fixture-project",browserSessionId:"00000000-0000-4000-8000-000000000001",page:{url:"http://localhost:3000/",pathname:"/",title:"Fixture",viewport:{width:9,height:9},devicePixelRatio:1,scroll:{x:0,y:0},renderRevision:0},selection:{mode:"page",targets:[]},request:{text:url,scope:"page",comparison:{enabled:true,url,maxIterations:6,targetMatch:99,threshold:30}}};}
 async function fixture(){const root=await mkdtemp(join(tmpdir(),"comparison-engine-"));roots.push(root);return {root,taskId:"00000000-0000-4000-8000-000000000002",context:context(),signal:new AbortController().signal,onState:()=>{}};}
 describe("real PNG comparison",()=>{
+  it("preserves structured permission failure and blocks before capture", async () => {
+    const opts = await fixture();
+    const denial = new AgentPermissionDeniedError(["mcp__figma__download"]);
+    const states: string[] = [];
+    await expect(runDesignComparison({
+      ...opts,
+      onState: (state) => { states.push(state.status); },
+      runAgent: async () => { throw denial; },
+      capture: async () => { throw new Error("must not capture"); },
+    })).rejects.toBe(denial);
+    expect(states).toEqual(["preparing", "blocked"]);
+  });
+
+  it.each([false, true])("explains missing reference artifacts without guessing permission denial (PNG exists %s)", async (pngExists) => {
+    const opts = await fixture();
+    const result = await runDesignComparison({
+      ...opts,
+      runAgent: async () => { if (pngExists) await writeFile(join(opts.root, opts.taskId, "reference.png"), image(255)); },
+      capture: async () => { throw new Error("must not capture"); },
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.message).toContain(`did not produce reference.${pngExists ? "json" : "png"}`);
+    expect(result.message).not.toMatch(/ENOENT|permission denied/i);
+  });
   it("computes all nine regions and genuine red heatmap without resizing",()=>{
     const reference=decodePng(image(255)),current=decodePng(image(255));
     current.data[0]=0;current.data[1]=0;current.data[2]=0;

@@ -203,6 +203,7 @@ export interface TaskRecord {
   verificationStatus?: "passed" | "partial" | "unverified" | "failed";
   comparison?: ComparisonState;
   error?: { code: string; message: string };
+  permissionDeniedTools?: string[];
   createdAt: string;
   startedAt?: string;
   completedAt?: string;

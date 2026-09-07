@@ -1,7 +1,9 @@
 /** Standalone task-viewer styles. */
 import { visualBridgeColorTokens } from "./design-tokens.js";
+import { logTextStyles } from "./log-text.js";
 
 export const viewerStyles = String.raw`
+  ${logTextStyles}
   .comparison-panel { margin-bottom: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--rule); }
   .comparison-panel > header, .comparison-image figcaption { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
   .comparison-panel h3 { margin: 0; font-size: 14px; }
@@ -830,14 +832,6 @@ export const viewerStyles = String.raw`
     font-size: 9px;
   }
 
-  .log-entry pre {
-    margin: 0;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
-  }
-
-  .log-toggle,
   .log-older {
     min-height: 30px;
     padding: 4px 8px;
@@ -849,15 +843,10 @@ export const viewerStyles = String.raw`
     font-size: 11px;
   }
 
-  .log-toggle {
-    margin-top: 5px;
-  }
-
   .log-older {
     margin: 8px 9px 0;
   }
 
-  .log-toggle:hover,
   .log-older:hover {
     background: var(--strip);
   }

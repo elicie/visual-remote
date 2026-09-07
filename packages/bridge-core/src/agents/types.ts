@@ -15,6 +15,8 @@ export interface AgentRunInput {
   contextBundlePath: string;
   environment: Record<string, string>;
   maxRunMs: number;
+  /** Exact MCP tool names explicitly approved for this task's invocation. */
+  allowedTools?: string[];
 }
 
 export interface AgentResumeInput extends AgentRunInput {
@@ -26,6 +28,7 @@ export type NormalizedAgentEvent =
   | { type: "phase"; name: string }
   | { type: "tool_start"; name: string; summary?: string }
   | { type: "tool_end"; name: string; ok: boolean }
+  | { type: "permission_denied"; toolName?: string }
   | {
       type: "command";
       command: string;
@@ -81,5 +84,19 @@ export class AgentCanceledError extends Error {
   constructor(message = "Agent run was canceled") {
     super(message);
     this.name = "AgentCanceledError";
+  }
+}
+
+export class AgentPermissionDeniedError extends Error {
+  readonly code = "AGENT_PERMISSION_DENIED";
+  readonly tools: string[];
+
+  constructor(tools: string[] = []) {
+    const names = [...new Set(tools)];
+    super(names.length
+      ? `Claude denied permission for: ${names.join(", ")}. Explicit tool approval or local Claude permission configuration is required before retrying.`
+      : "Claude denied tool permission without identifying the tool. Check local Claude permission configuration before retrying.");
+    this.name = "AgentPermissionDeniedError";
+    this.tools = names;
   }
 }
