@@ -8,6 +8,13 @@ const TIMEOUT = 30_000;
 const HELP = "Open the verification browser and sign in to its separate profile. Only URL-addressable state is supported; original-tab in-memory modals, form values and sessionStorage are not copied.";
 const INSTALL = "Verification browser is not installed. Install Google Chrome or run `npx --yes --package playwright@1.62.1 playwright install chromium`, then retry.";
 const missingExecutable = (message: string) => /executable (?:doesn't exist|does not exist)|distribution ['"]?chrome['"]? is not found/i.test(message);
+function diagnosticRoute(value: string | undefined): string {
+  if (!value) return "unavailable";
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) ? `${url.origin}${url.pathname}` : "non-HTTP(S) page";
+  } catch { return "invalid URL"; }
+}
 export interface ComparisonBrowserOptions { profileDirectory: string; upstreamUrl: string; headless?: boolean; executablePath?: string }
 interface ActiveTask { id: string; url: string; page?: Page; creating?: Promise<Page>; signal: AbortSignal; abort: () => void }
 
@@ -41,7 +48,7 @@ export class ComparisonBrowser {
     this.launching = (async () => {
       await mkdir(this.options.profileDirectory, { recursive: true, mode: 0o700 });
       await chmod(this.options.profileDirectory, 0o700);
-      const options = { headless: this.options.headless ?? false, deviceScaleFactor: 1, timeout: TIMEOUT, ...(this.options.executablePath ? { executablePath: this.options.executablePath } : {}) };
+      const options = { headless: this.options.headless ?? false, viewport: null, timeout: TIMEOUT, ...(this.options.executablePath ? { executablePath: this.options.executablePath } : {}) };
       const chrome = !this.options.executablePath && !this.options.headless;
       let browser: BrowserContext;
       try { browser = await chromium.launchPersistentContext(this.options.profileDirectory, { ...options, ...(chrome ? { channel: "chrome" } : {}) }); }
@@ -105,7 +112,8 @@ export class ComparisonBrowser {
     } catch (error) { await this.finish(taskId); throw error; }
   }
   private checkRoute(task: ActiveTask): void {
-    if (task.page?.url() !== task.url) throw new Error(`Verification route redirected or changed (possibly login). ${HELP}`);
+    const actual = task.page?.url();
+    if (actual !== task.url) throw new Error(`Verification route redirected or changed. Expected: ${diagnosticRoute(task.url)}; actual: ${diagnosticRoute(actual)}. Query strings, fragments and credentials are omitted from these addresses; the full URLs must match exactly. Check application redirects and URL-addressable state, not only login. ${HELP}`);
   }
   private async navigate(task: ActiveTask, context: ContextBundle, reload = false): Promise<void> {
     const response = reload

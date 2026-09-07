@@ -25,6 +25,7 @@ async function fixture() {
     requests.push(request.url!);
     if (request.url === "/slow") return;
     if (request.url === "/private" && !request.headers.cookie?.includes("logged=yes")) { response.writeHead(302, { location: "/login" }); response.end(); return; }
+    if (request.url?.startsWith("/redirect?")) { response.writeHead(302, { location: "/destination?token=redirect-secret#redirect-fragment" }); response.end(); return; }
     if (request.url === "/signin") response.setHeader("set-cookie", "logged=yes; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax");
     response.setHeader("content-type", "text/html");
     const body = request.url === "/missing" || request.url === "/login" ? "<h1>Sign in</h1>" : `<div id="target">${text}</div>`;
@@ -52,9 +53,12 @@ describe("dedicated persistent verification browser", () => {
     const setup = owned(f.manager).setupPage;
     await setup.evaluate(() => { sessionStorage.setItem("private-state", "setup-only"); document.title = "Setup untouched"; });
     const setupViewport = setup.viewportSize();
+    expect(setupViewport).toBeNull();
     await f.manager.begin(id, ctx, signal);
     const page = owned(f.manager).active!.page;
     expect(page).not.toBe(setup);
+    expect(page.viewportSize()).toEqual(ctx.page.viewport);
+    expect(await page.evaluate(() => ({ width: innerWidth, height: innerHeight }))).toEqual(ctx.page.viewport);
     expect(page.url()).toBe(`${f.upstreamUrl}/frame?view=one#target`);
     expect(await page.evaluate(() => sessionStorage.getItem("private-state"))).toBeNull();
     await expect(f.manager.open()).rejects.toThrow(/busy/);
@@ -96,6 +100,37 @@ describe("dedicated persistent verification browser", () => {
     const reopened = f.makeManager();
     await reopened.begin(randomUUID(), context("/private"), signal);
     expect(owned(reopened).active!.page.url()).toBe(`${f.upstreamUrl}/private`);
+  }, 60_000);
+
+  it("reports safe expected and actual redirect routes without accepting the changed URL", async () => {
+    const f = await fixture(), signal = new AbortController().signal;
+    const error = await f.manager.begin(randomUUID(), context("/redirect?token=source-secret#source-fragment"), signal).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain(`Expected: ${f.upstreamUrl}/redirect; actual: ${f.upstreamUrl}/destination.`);
+    expect(message).toContain("Check application redirects and URL-addressable state, not only login");
+    for (const secret of ["source-secret", "source-fragment", "redirect-secret", "redirect-fragment", "?token=", "#"]) expect(message).not.toContain(secret);
+    expect(owned(f.manager).active).toBeUndefined();
+    await f.manager.begin(randomUUID(), context(), signal);
+  }, 60_000);
+
+  it("still rejects query-only and fragment-only route changes with redacted diagnostics", async () => {
+    const f = await fixture(), signal = new AbortController().signal, ctx = context();
+    for (const suffix of ["?view=changed-secret#target", "?view=one#changed-fragment"]) {
+      const id = randomUUID();
+      await f.manager.begin(id, ctx, signal);
+      const page = owned(f.manager).active!.page;
+      await page.evaluate((suffix) => history.replaceState(null, "", `/frame${suffix}`), suffix);
+      const error = await f.manager.capture(id, ctx, { width: 120, height: 60 }, signal).catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(Error);
+      const message = (error as Error).message;
+      expect(message).toContain(`Expected: ${f.upstreamUrl}/frame; actual: ${f.upstreamUrl}/frame.`);
+      expect(message).toContain("the full URLs must match exactly");
+      expect(message).not.toContain("changed-secret");
+      expect(message).not.toContain("changed-fragment");
+      expect(page.isClosed()).toBe(true);
+      expect(owned(f.manager).active).toBeUndefined();
+    }
   }, 60_000);
 
   it("rejects missing, ambiguous, mismatched and unverifiable state before edits and releases ownership", async () => {
