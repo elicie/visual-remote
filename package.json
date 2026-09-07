@@ -1,6 +1,6 @@
 {
   "name": "visual-remote",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Visual bridge from a running web UI to a coding agent in its Git worktree",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
@@ -22,7 +22,8 @@
     "apps/cli/next.d.ts",
     "apps/cli/next-client.d.ts",
     "packages/overlay/dist/client.js",
-    "packages/overlay/dist/viewer.js"
+    "packages/overlay/dist/viewer.js",
+    "packages/bridge-core/src/comparison/MIMIKYU-LICENSE.txt"
   ],
   "bin": {
     "visual": "./apps/cli/dist/index.js",
@@ -65,6 +66,7 @@
   "dependencies": {
     "commander": "^15.0.0",
     "http-proxy": "^1.18.1",
+    "pngjs": "7.0.0",
     "ws": "^8.21.1",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
@@ -81,6 +83,7 @@
     "@playwright/test": "^1.62.1",
     "@types/http-proxy": "^1.17.17",
     "@types/node": "^26.1.2",
+    "@types/pngjs": "6.0.5",
     "@types/ws": "^8.18.1",
     "@visual-remote/bridge-core": "workspace:*",
     "@visual-remote/cli": "workspace:*",

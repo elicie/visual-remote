@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { isAbsolute, parse, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -120,12 +121,18 @@ export class ClaudeAdapter implements AgentAdapter {
     return `${input.prompt.trimEnd()}\n\n${guidance}\n`;
   }
 
-  #baseArgs(): string[] {
+  #baseArgs(input: AgentRunInput): string[] {
+    const directory = input.artifactDirectory;
+    if (directory !== undefined
+      && (!isAbsolute(directory) || resolve(directory) === parse(directory).root)) {
+      throw new Error("Artifact directory must be an absolute non-root path");
+    }
     return [
       "-p",
       "--output-format",
       "stream-json",
       "--verbose",
+      ...(directory === undefined ? [] : ["--add-dir", directory]),
       ...(this.#model === undefined ? [] : ["--model", this.#model]),
       ...(this.#reasoningEffort === undefined
         ? []
@@ -163,7 +170,7 @@ export class ClaudeAdapter implements AgentAdapter {
     input: AgentRunInput,
     signal: AbortSignal,
   ): AsyncIterable<NormalizedAgentEvent> {
-    yield* this.#execute(input, signal, this.#baseArgs());
+    yield* this.#execute(input, signal, this.#baseArgs(input));
   }
 
   async *resume(
@@ -176,7 +183,7 @@ export class ClaudeAdapter implements AgentAdapter {
     yield* this.#execute(
       input,
       signal,
-      [...this.#baseArgs(), "--resume", input.sessionId],
+      [...this.#baseArgs(input), "--resume", input.sessionId],
     );
   }
 

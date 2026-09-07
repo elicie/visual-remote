@@ -2,6 +2,21 @@
 import { visualBridgeColorTokens } from "./design-tokens.js";
 
 export const viewerStyles = String.raw`
+  .comparison-panel { margin-bottom: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--rule); }
+  .comparison-panel > header, .comparison-image figcaption { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .comparison-panel h3 { margin: 0; font-size: 14px; }
+  .comparison-panel a { color: var(--ink); text-underline-offset: 3px; }
+  .comparison-iteration { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .comparison-iteration select { max-width: 100%; padding: 7px; font: inherit; color: var(--ink); background: var(--strip-strong); border: 1px solid var(--rule); }
+  .comparison-iteration select:focus-visible { outline: 3px solid var(--strip-strong); outline-offset: 2px; box-shadow: 0 0 0 5px var(--dispatch-dark); }
+  .comparison-metrics, .comparison-regions { display: flex; flex-wrap: wrap; gap: 12px 24px; font-variant-numeric: tabular-nums; }
+  .comparison-metrics dd, .comparison-regions dd { margin: 4px 0 0; font-weight: 650; }
+  .comparison-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 16px; margin-top: 16px; }
+  .comparison-image { min-width: 0; margin: 0; }
+  .comparison-image figcaption { margin-bottom: 8px; font-weight: 650; }
+  .comparison-image figcaption a { font-size: 12px; font-weight: 400; }
+  .comparison-image img { display: block; width: 100%; height: auto; border: 1px solid var(--rule); }
+  .comparison-message, .comparison-issues { overflow-wrap: anywhere; }
   :root {
     color-scheme: light;
     ${visualBridgeColorTokens}

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { PNG } from "pngjs";
 
 import {
   createTaskControlService,
@@ -68,6 +69,7 @@ const upstream = createServer((_request, response) => {
       <h1>Remote preview fixture</h1>
       <p>Select the button and dispatch a safe test change.</p>
       <button id="primary" data-testid="primary-action" data-source-file="src/screen.ts" data-source-line="1">Save changes</button>
+      ${process.env.VISUAL_FIXTURE_COMPARISON === "true" ? '<div id="comparison-target" data-source-file="src/screen.ts" data-source-line="1" style="width:64px;height:64px;background:rgb(31,111,235)"></div>' : ""}
     </main>
   </body>
 </html>`);
@@ -81,7 +83,21 @@ await new Promise<void>((resolve, reject) => {
 const gitManager = await GitTransactionManager.open(repoRoot, {
   allowed: ["src/**"],
 });
-const adapter = new FakeAgentAdapter(async () => {
+const adapter = new FakeAgentAdapter(async (input) => {
+  const artifactDirectory = input.prompt.match(/^COMPARISON_ARTIFACT_DIRECTORY=(.+)$/m)?.[1];
+  if (artifactDirectory && input.prompt.includes("COMPARISON_PHASE=REFERENCE_ONLY")) {
+    const png = new PNG({ width: 64, height: 64 });
+    for (let index = 0; index < png.data.length; index += 4) {
+      png.data[index] = 31; png.data[index + 1] = 111; png.data[index + 2] = 235; png.data[index + 3] = 255;
+    }
+    await mkdir(artifactDirectory, { recursive: true });
+    await writeFile(join(artifactDirectory, "reference.png"), PNG.sync.write(png));
+    await writeFile(join(artifactDirectory, "reference.json"), JSON.stringify({
+      width: 64, height: 64, targets: [],
+      sourceUrl: "https://www.figma.com/design/fixture/Test?node-id=1-2", nodeId: "1:2",
+    }));
+    return [{ type: "complete" as const, summary: "Fixture reference prepared." }];
+  }
   await delay(350);
   await writeFile(
     join(repoRoot, "src", "screen.ts"),
@@ -93,12 +109,14 @@ const adapter = new FakeAgentAdapter(async () => {
     { type: "complete", summary: "Changed the fixture button tone." },
   ];
 });
+const comparisonRoot = await mkdtemp(join(tmpdir(), "visual-comparison-fixture-"));
 const taskService = new TaskService({
   projectId,
   workspaceRoot: repoRoot,
   adapter,
   store: new SqliteTaskStore(":memory:"),
   git: gitManager,
+  comparisonRoot,
 });
 const controlService = createTaskControlService({
   taskService,
@@ -138,6 +156,7 @@ const close = async () => {
     upstream.close((error) => (error ? reject(error) : resolve()));
   });
   await rm(repoRoot, { recursive: true, force: true });
+  await rm(comparisonRoot, { recursive: true, force: true });
 };
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

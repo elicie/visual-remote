@@ -1,6 +1,6 @@
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { parse, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -76,8 +76,13 @@ describe("ClaudeAdapter", () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
-  it("preserves Claude configuration and permissions for new and resumed stream runs", async () => {
+  it.each([false, true])("preserves fresh/resume configuration with artifact access %s", async (withArtifacts) => {
     const directory = await mkdtemp(resolve(tmpdir(), "visual-claude-test-"));
+    const artifactDirectory = resolve(`${directory} artifacts`, "task-test");
+    const runInput = {
+      ...input(directory),
+      ...(withArtifacts ? { artifactDirectory } : {}),
+    };
     try {
       const adapter = new ClaudeAdapter({
         executable: await executable(directory),
@@ -88,7 +93,7 @@ describe("ClaudeAdapter", () => {
 
       const runEvents: NormalizedAgentEvent[] = [];
       for await (const event of adapter.run(
-        input(directory),
+        runInput,
         new AbortController().signal,
       )) {
         runEvents.push(event);
@@ -98,12 +103,13 @@ describe("ClaudeAdapter", () => {
       expect(run.cwd).toBe(directory);
       expect(run.args).toEqual([
         "-p", "--output-format", "stream-json", "--verbose",
+        ...(withArtifacts ? ["--add-dir", artifactDirectory] : []),
         "--model", "sonnet", "--effort", "high",
       ]);
 
       const resumeEvents: NormalizedAgentEvent[] = [];
       for await (const event of adapter.resume(
-        { ...input(directory), sessionId: "claude-session" },
+        { ...runInput, sessionId: "claude-session" },
         new AbortController().signal,
       )) {
         resumeEvents.push(event);
@@ -115,6 +121,23 @@ describe("ClaudeAdapter", () => {
       await rm(directory, { recursive: true });
     }
   });
+
+  it.each(["", "relative/artifacts", parse(tmpdir()).root, `${parse(tmpdir()).root}tmp/..`])(
+    "rejects unsafe artifact directory %j before starting fresh or resumed runs",
+    async (artifactDirectory) => {
+      const adapter = new ClaudeAdapter({ executable: "must-not-start", rtkExecutable: false });
+      const runInput = { ...input(tmpdir()), artifactDirectory };
+      const signal = new AbortController().signal;
+      for (const events of [
+        adapter.run(runInput, signal),
+        adapter.resume({ ...runInput, sessionId: "claude-session" }, signal),
+      ]) {
+        await expect(events[Symbol.asyncIterator]().next()).rejects.toThrow(
+          "Artifact directory must be an absolute non-root path",
+        );
+      }
+    },
+  );
 
   it("inherits config, authentication and proxy settings without copying unrelated secrets", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "visual-claude-env-test-"));

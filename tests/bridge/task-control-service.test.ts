@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   BrowserSessionManager,
@@ -90,6 +90,72 @@ function context(projectId: string): ContextBundle {
 }
 
 describe("task control service", () => {
+  it("correlates captures to the originating control socket and aborts on disconnect", async () => {
+    const repoRoot = await repositoryFixture();
+    const taskService = new TaskService({ projectId: "fixture", adapter: new FakeAgentAdapter(), store: new SqliteTaskStore(":memory:"), git: await GitTransactionManager.open(repoRoot) });
+    const install = vi.spyOn(taskService, "setComparisonCaptureHandler");
+    const control = createTaskControlService({ taskService, hmrWaitMs: 0, project: { id: "fixture", repoRoot, workspaceRoot: repoRoot, mode: "attach", upstreamUrl: "http://localhost:10002" } });
+    const capture = install.mock.calls[0]![0]!;
+    const socket = new FakeControlSocket();
+    const other = new FakeControlSocket();
+    const disconnect = (await control.connectWebSocket!({ socket: socket as never, request: {} as never, projectId: "fixture" }))!;
+    const disconnectOther = (await control.connectWebSocket!({ socket: other as never, request: {} as never, projectId: "fixture" }))!;
+    const bundle = context("fixture");
+    const emit = (target: FakeControlSocket, type: string, payload: unknown, session = bundle.browserSessionId) => target.emit("message", Buffer.from(JSON.stringify({ id: crypto.randomUUID(), type, browserSessionId: session, payload })));
+    emit(socket, "browser.hello", {});
+    emit(other, "browser.hello", {}, "00000000-0000-4000-8000-000000000099");
+    const task = taskService.create(bundle);
+    await taskService.waitForIdle();
+    const abort = new AbortController();
+    const pending = capture(task.id, bundle, { width: 3, height: 3 }, abort.signal);
+    const requested = taskService.replay().filter((event) => event.type === "comparison.capture_requested").at(-1)!.payload as { requestId: string };
+    const result = { requestId: requested.requestId, taskId: task.id, error: "Real browser declined capture" };
+    let resolved = false;
+    void pending.then(() => { resolved = true; });
+    emit(other, "comparison.capture_result", result);
+    emit(socket, "comparison.capture_result", { ...result, taskId: crypto.randomUUID() });
+    emit(socket, "comparison.capture_result", result, "00000000-0000-4000-8000-000000000099");
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    const canceledController = new AbortController();
+    const canceled = capture(task.id, bundle, { width: 3, height: 3 }, canceledController.signal);
+    const cancelAssertion = expect(canceled).rejects.toThrow("User canceled");
+    canceledController.abort(new Error("User canceled"));
+    await cancelAssertion;
+    vi.useFakeTimers();
+    try {
+      const timedOut = capture(task.id, bundle, { width: 3, height: 3 }, abort.signal);
+      const timeoutAssertion = expect(timedOut).rejects.toThrow("60 seconds");
+      await vi.advanceTimersByTimeAsync(60_000);
+      await timeoutAssertion;
+    } finally {
+      vi.useRealTimers();
+    }
+    emit(socket, "comparison.capture_result", result);
+    expect(await pending).toEqual(result);
+    emit(socket, "task.create", { contextBundle: bundle, padding: "x".repeat(1024 * 1024) });
+    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({ type: "command.error", payload: { code: "invalid_message" } });
+    const viewer = new FakeControlSocket();
+    const disconnectViewer = (await control.connectViewerWebSocket!({ socket: viewer as never, request: {} as never, projectId: "fixture" }))!;
+    emit(viewer, "comparison.capture_result", { ...result, pngBase64: "A".repeat(1024 * 1024) });
+    expect(JSON.parse(viewer.sent.at(-1)!)).toMatchObject({ type: "command.error", payload: { code: "invalid_message" } });
+    disconnectViewer();
+    const largeCapture = capture(task.id, bundle, { width: 3, height: 3 }, abort.signal);
+    const largeRequest = taskService.replay().filter((event) => event.type === "comparison.capture_requested").at(-1)!.payload as { requestId: string };
+    const largeResult = { requestId: largeRequest.requestId, taskId: task.id, pngBase64: "A".repeat(1024 * 1024) };
+    emit(other, "comparison.capture_result", largeResult);
+    expect(JSON.parse(other.sent.at(-1)!)).toMatchObject({ type: "command.error", payload: { code: "invalid_message" } });
+    emit(socket, "comparison.capture_result", largeResult);
+    expect((await largeCapture).pngBase64).toHaveLength(1024 * 1024);
+    const disconnected = capture(task.id, bundle, { width: 3, height: 3 }, abort.signal);
+    const rejected = expect(disconnected).rejects.toThrow("disconnected");
+    disconnect();
+    await rejected;
+    expect(JSON.stringify(taskService.replay())).not.toContain("Real browser declined capture");
+    disconnectOther();
+    await control.close?.();
+  });
+
   it("connects a control request to the writer queue and task diff", async () => {
     const repoRoot = await repositoryFixture();
     const gitManager = await GitTransactionManager.open(repoRoot, {

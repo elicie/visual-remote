@@ -9,6 +9,8 @@ export interface AgentRunInput {
   taskId: string;
   repoRoot: string;
   workspaceRoot: string;
+  /** Trusted TaskService-generated absolute per-task artifact root, never a user payload path. */
+  artifactDirectory?: string;
   prompt: string;
   contextBundlePath: string;
   environment: Record<string, string>;

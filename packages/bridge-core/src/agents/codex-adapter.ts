@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { isAbsolute, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -174,6 +175,15 @@ export class CodexAdapter implements AgentAdapter {
     ];
   }
 
+  #artifactArgs(input: AgentRunInput): string[] {
+    const directory = input.artifactDirectory;
+    if (directory === undefined) return [];
+    if (!isAbsolute(directory) || resolve(directory) === parse(directory).root) {
+      throw new Error("Artifact directory must be an absolute non-root path");
+    }
+    return ["--add-dir", directory];
+  }
+
   async probe(): Promise<AgentCapabilities> {
     return await new Promise<AgentCapabilities>((resolve) => {
       const child = spawn(this.#executable, ["--version"], {
@@ -213,6 +223,7 @@ export class CodexAdapter implements AgentAdapter {
       "workspace-write",
       "-C",
       input.workspaceRoot,
+      ...this.#artifactArgs(input),
       ...this.#modelConfig(),
       ...this.#directExecConfig(input),
       "-",
@@ -236,6 +247,7 @@ export class CodexAdapter implements AgentAdapter {
       "workspace-write",
       "-C",
       input.workspaceRoot,
+      ...this.#artifactArgs(input),
       ...this.#modelConfig(),
       ...this.#directExecConfig(input),
       "resume",

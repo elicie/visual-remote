@@ -12,6 +12,8 @@ import {
   type NormalizedAgentEvent,
 } from "../agents/index.js";
 import { resolveContextSources } from "../context/resolve-sources.js";
+import { runDesignComparison, getComparisonArtifact } from "../comparison/engine.js";
+import { resolveStoragePaths } from "../storage/paths.js";
 import {
   GitTransactionManager,
   RepositorySafetyError,
@@ -20,6 +22,10 @@ import {
 } from "../git/index.js";
 import {
   contextBundleSchema,
+  normalizeComparisonRequest,
+  type CaptureResult,
+  type ComparisonCaptureRequest,
+  type ComparisonState,
   type ContextBundle,
   type ServerEvent,
   type SourceLocation,
@@ -52,6 +58,8 @@ export interface TaskServiceOptions {
   maxPending?: number;
   resumeMode?: "auto" | "new";
   environment?: Record<string, string>;
+  comparisonRoot?: string;
+  captureComparison?: (taskId: string, context: ContextBundle, dimensions: { width: number; height: number }, signal: AbortSignal) => Promise<CaptureResult>;
   idFactory?: () => string;
   now?: () => Date;
 }
@@ -88,6 +96,7 @@ function publicTask(task: StoredTask): TaskRecord {
   if (task.beforeRef) result.beforeRef = task.beforeRef;
   if (task.afterRef) result.afterRef = task.afterRef;
   if (task.verificationStatus) result.verificationStatus = task.verificationStatus;
+  if (task.comparison) result.comparison = structuredClone(task.comparison);
   if (task.error) result.error = { ...task.error };
   if (task.startedAt) result.startedAt = task.startedAt;
   if (task.completedAt) result.completedAt = task.completedAt;
@@ -171,6 +180,8 @@ export class TaskService {
   #recovering = false;
   #draining = false;
   #closed = false;
+  readonly #comparisonRoot: string | undefined;
+  #captureComparison: TaskServiceOptions["captureComparison"];
 
   constructor(options: TaskServiceOptions) {
     this.#projectId = options.projectId;
@@ -194,6 +205,8 @@ export class TaskService {
     this.#environment = { ...(options.environment ?? {}) };
     this.#idFactory = options.idFactory ?? randomUUID;
     this.#now = options.now ?? (() => new Date());
+    this.#comparisonRoot = options.comparisonRoot === undefined ? undefined : resolve(options.comparisonRoot);
+    this.#captureComparison = options.captureComparison;
     this.#recoverPersistedTasks();
   }
 
@@ -206,6 +219,13 @@ export class TaskService {
       );
     }
     const context = contextBundleSchema.parse(contextInput);
+    try {
+      const inherited = options.parentTaskId ? this.#store.getTask(options.parentTaskId)?.contextBundle.request.comparison : undefined;
+      const comparison = normalizeComparisonRequest(context.request.text, context.request.comparison ?? inherited);
+      if (comparison) context.request.comparison = comparison;
+    } catch (error) {
+      throw new TaskServiceError("INVALID_COMPARISON", error instanceof Error ? error.message : "Invalid Figma comparison request");
+    }
     if (context.projectId !== this.#projectId) {
       throw new TaskServiceError(
         "PROJECT_MISMATCH",
@@ -228,12 +248,45 @@ export class TaskService {
       changedFiles: [],
       createdAt,
     };
+    if (context.request.comparison?.enabled) task.comparison = {
+      status: "preparing", url: context.request.comparison.url!, iteration: 0,
+      maxIterations: context.request.comparison.maxIterations, iterations: [],
+      threshold: context.request.comparison.threshold, targetMatch: context.request.comparison.targetMatch,
+    };
     if (options.parentTaskId) task.parentTaskId = options.parentTaskId;
     this.#store.createTask(task);
     this.#queue.push(task.id);
     this.#emit("task.queued", { task: publicTask(task) }, task.id);
     void this.#drain();
     return publicTask(task);
+  }
+
+  setComparisonCaptureHandler(handler: TaskServiceOptions["captureComparison"]): void {
+    this.#captureComparison = handler;
+  }
+
+  requestComparisonCapture(request: ComparisonCaptureRequest): void {
+    this.#requireTask(request.taskId);
+    this.#emit("comparison.capture_requested", request, request.taskId);
+  }
+
+  async getArtifact(artifactId: string) {
+    return getComparisonArtifact(await this.#resolveComparisonRoot(), artifactId);
+  }
+
+  async #resolveComparisonRoot(): Promise<string> {
+    const root = this.#comparisonRoot ?? resolve((await resolveStoragePaths(this.#git.repoRoot)).logsDirectory, "..", "comparisons");
+    try {
+      return await realpath(root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return root;
+    }
+  }
+
+  #recordComparison(taskId: string, comparison: ComparisonState): void {
+    const task = this.#store.updateTask(taskId, { comparison });
+    this.#emit("task.comparison_updated", { task: publicTask(task) }, taskId);
   }
 
   get(id: string): TaskRecord | undefined {
@@ -324,6 +377,7 @@ export class TaskService {
     const task = this.#requireTask(id);
     if (isTerminalTaskStatus(task.status) || task.status === "review") return publicTask(task);
     this.#cancelRequested.add(id);
+    if (task.comparison) this.#recordComparison(id, { ...task.comparison, status: "canceled", message: "Task was canceled" });
     if (task.status === "queued") {
       const index = this.#queue.indexOf(id);
       if (index >= 0) this.#queue.splice(index, 1);
@@ -417,6 +471,7 @@ export class TaskService {
     for (const task of persisted) {
       if (task.status === "queued") this.#queue.unshift(task.id);
       else if (isActiveTaskStatus(task.status)) {
+        if (task.comparison) this.#recordComparison(task.id, { ...task.comparison, status: "blocked", message: "Bridge interrupted comparison; start a new task to compare again." });
         if (task.beforeRef) {
           this.#recoveryQueue.unshift(task.id);
         } else {
@@ -596,6 +651,7 @@ export class TaskService {
     let contextPath: string | undefined;
     let failure: unknown;
     let timedOut = false;
+    const deadline = Date.now() + this.#maxRunMs;
     const timeout = setTimeout(() => {
       timedOut = true;
       controller.abort(new AgentTimeoutError());
@@ -648,20 +704,49 @@ export class TaskService {
       };
       const task = this.#requireTask(taskId);
       const parentTask = task.parentTaskId ? this.#store.getTask(task.parentTaskId) : undefined;
-      const stream =
-        this.#resumeMode === "auto" && parentTask?.agentSessionId && this.#adapter.resume
-          ? this.#adapter.resume(
-              { ...input, sessionId: parentTask.agentSessionId } satisfies AgentResumeInput,
-              controller.signal,
-            )
-          : this.#adapter.run(input, controller.signal);
-      for await (const event of stream) {
-        this.#recordAgentEvent(taskId, event);
+      let sessionId = this.#resumeMode === "auto" ? parentTask?.agentSessionId : undefined;
+      const runAgent = async (agentPrompt: string): Promise<void> => {
+        controller.signal.throwIfAborted();
+        const runInput = { ...input, prompt: agentPrompt, maxRunMs: Math.max(1, deadline - Date.now()) };
+        const stream = sessionId && this.#adapter.resume
+          ? this.#adapter.resume({ ...runInput, sessionId } satisfies AgentResumeInput, controller.signal)
+          : this.#adapter.run(runInput, controller.signal);
+        for await (const event of stream) this.#recordAgentEvent(taskId, event);
+        sessionId = this.#requireTask(taskId).agentSessionId;
+        controller.signal.throwIfAborted();
+      };
+      if (context.request.comparison?.enabled) {
+        let root = await this.#resolveComparisonRoot();
+        await mkdir(root, { recursive: true, mode: 0o700 });
+        root = await realpath(root);
+        input.artifactDirectory = resolve(root, taskId);
+        let preparation = true;
+        const result = await runDesignComparison({
+          taskId, context, root, signal: controller.signal,
+          runAgent: async (instruction) => {
+            const exception = `The only additional writable directory outside the repository is ${resolve(root, taskId)}, exclusively for comparison reference/evidence files. Never write elsewhere outside the repository.`;
+            const combined = preparation ? `${instruction}\n\n${exception}\nThis is reference preparation only. Do not edit application/repository files.` : `${prompt}\n\n${exception}\n\n${instruction}`;
+            preparation = false;
+            await runAgent(combined);
+          },
+          capture: async (dimensions) => {
+            if (!this.#captureComparison) throw new Error("Comparison capture unavailable. Connect the originating browser and explicitly share the current tab.");
+            return this.#captureComparison(taskId, context, dimensions, controller.signal);
+          },
+          onState: (state) => this.#recordComparison(taskId, state),
+        });
+        controller.signal.throwIfAborted();
+        this.#recordComparison(taskId, result);
+        if (result.status === "blocked" || result.status === "canceled") throw new TaskServiceError("COMPARISON_BLOCKED", result.message ?? "Comparison could not finish");
+      } else {
+        await runAgent(prompt);
       }
       this.#throwIfCanceled(taskId);
     } catch (error) {
       failure = timedOut ? new AgentTimeoutError() : error;
       const normalized = errorInfo(failure);
+      const comparison = this.#requireTask(taskId).comparison;
+      if (comparison) this.#recordComparison(taskId, { ...comparison, status: this.#cancelRequested.has(taskId) ? "canceled" : "blocked", message: normalized.message });
       this.#recordAgentEvent(taskId, { type: "error", text: normalized.message });
     } finally {
       clearTimeout(timeout);
@@ -716,6 +801,7 @@ export class TaskService {
     } catch (postError) {
       const info = errorInfo(postError);
       const current = this.#requireTask(taskId);
+      if (current.comparison) this.#recordComparison(taskId, { ...current.comparison, status: this.#cancelRequested.has(taskId) ? "canceled" : "blocked", message: info.message });
       if (current.status !== "unsafe") {
         const canceled =
           this.#cancelRequested.has(taskId) ||
@@ -746,6 +832,9 @@ export class TaskService {
   ): StoredTask {
     const current = this.#requireTask(taskId);
     assertTaskStatusTransition(current.status, status);
+    if ((status === "unsafe" || status === "failed" || status === "canceled") && current.comparison) {
+      this.#recordComparison(taskId, { ...current.comparison, status: status === "canceled" ? "canceled" : "blocked", message: patch.error?.message ?? "Task did not finish safely" });
+    }
     const next = this.#store.updateTask(taskId, { ...patch, status });
     this.#emit("task.phase_changed", { task: publicTask(next), status }, taskId);
     return next;

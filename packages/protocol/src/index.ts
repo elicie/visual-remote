@@ -68,6 +68,54 @@ const selectionSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("page"), targets: z.array(targetContextSchema).max(20) }),
 ]);
 
+export const comparisonRequestSchema = z.object({
+  enabled: z.boolean(),
+  url: z.string().optional(),
+  maxIterations: z.number().int().min(1).max(20).default(4),
+  targetMatch: z.number().min(0).max(100).default(99),
+  threshold: z.number().int().min(0).max(255).default(30),
+});
+export type ComparisonRequest = z.infer<typeof comparisonRequestSchema>;
+
+export function normalizeComparisonRequest(text: string, explicit?: Partial<ComparisonRequest>): ComparisonRequest | undefined {
+  if (explicit?.enabled === false) return comparisonRequestSchema.parse(explicit);
+  const detected = text.match(/https:\/\/(?:www\.)?figma\.com\/(?:design|file)\/[^\s<>"']+/i)?.[0]?.replace(/[),.;]+$/, "");
+  if (!explicit?.enabled && !detected) return undefined;
+  const request = comparisonRequestSchema.parse({ ...explicit, enabled: true, url: explicit?.url || detected });
+  let url: URL;
+  try { url = new URL(request.url ?? ""); } catch { throw new Error("Figma comparison requires a full HTTPS frame URL with node-id."); }
+  if (url.protocol !== "https:" || !/^(www\.)?figma\.com$/i.test(url.hostname) || url.username || url.password || url.port || !/^\/(design|file)\/[a-zA-Z0-9]+(?:\/|$)/.test(url.pathname)) {
+    throw new Error("Use a full https://www.figma.com/design/… or /file/… frame URL.");
+  }
+  const node = url.searchParams.get("node-id");
+  if (!node || !/^\d+[-:]\d+$/.test(node)) throw new Error("Select a Figma frame and copy its link including node-id (for example node-id=1-2).");
+  request.url = url.toString();
+  return request;
+}
+
+export const comparisonMeasuredTargetSchema = z.object({ text: z.string(), rect: rectSchema, styles: z.record(z.string(), z.string()) });
+export type ComparisonMeasuredTarget = z.infer<typeof comparisonMeasuredTargetSchema>;
+export const captureResultSchema = z.object({
+  requestId: z.string().uuid(), taskId: z.string().uuid(),
+  pngBase64: z.string().max(22_369_624).optional(),
+  width: z.number().int().positive().max(8192).optional(),
+  height: z.number().int().positive().max(8192).optional(),
+  targets: z.array(comparisonMeasuredTargetSchema).max(2000).optional(),
+  error: z.string().max(4000).optional(),
+});
+export type CaptureResult = z.infer<typeof captureResultSchema>;
+export interface ComparisonCaptureRequest { requestId: string; taskId: string; browserSessionId: string; width: number; height: number }
+export interface ComparisonIteration {
+  iteration: number; overallMatch: number; regions: Record<string, number>; structuralMismatches: number; missingTargets: number;
+  issues: string[]; referenceArtifactId: string; screenshotArtifactId: string; heatmapArtifactId: string; overlayArtifactId: string;
+}
+export interface ComparisonState {
+  status: "preparing" | "capturing" | "comparing" | "correcting" | "passed" | "unmatched" | "blocked" | "canceled";
+  url: string; iteration: number; maxIterations: number; message?: string; iterations: ComparisonIteration[];
+  threshold?: number;
+  targetMatch?: number;
+}
+
 export const contextBundleSchema = z.object({
   version: z.literal(1),
   projectId: z.string().min(1),
@@ -85,6 +133,7 @@ export const contextBundleSchema = z.object({
   request: z.object({
     text: z.string().trim().min(1).max(10_000),
     scope: z.enum(["instance", "page", "component", "project"]),
+    comparison: comparisonRequestSchema.optional(),
   }),
 });
 
@@ -124,6 +173,7 @@ export const clientMessageSchema = z.object({
     "task.accept",
     "task.revert",
     "task.follow_up",
+    "comparison.capture_result",
   ]),
   browserSessionId: z.string().uuid(),
   payload: z.unknown(),
@@ -153,6 +203,7 @@ export interface TaskRecord {
   afterRef?: string;
   changedFiles: string[];
   verificationStatus?: "passed" | "partial" | "unverified" | "failed";
+  comparison?: ComparisonState;
   error?: { code: string; message: string };
   createdAt: string;
   startedAt?: string;

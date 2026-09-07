@@ -76,6 +76,8 @@ function rowToTask(row: Row): StoredTask {
   if (verificationStatus) {
     record.verificationStatus = verificationStatus as NonNullable<TaskRecord["verificationStatus"]>;
   }
+  const comparison = parseJson<TaskRecord["comparison"]>(row.comparison_json, undefined);
+  if (comparison) record.comparison = comparison;
   if (diffText !== undefined) record.diffText = diffText;
   if (errorCode || errorMessage) {
     record.error = {
@@ -106,6 +108,7 @@ function taskParams(task: StoredTask): Record<string, SqlValue> {
     after_ref: task.afterRef ?? null,
     changed_files_json: JSON.stringify(task.changedFiles),
     verification_status: task.verificationStatus ?? null,
+    comparison_json: task.comparison ? JSON.stringify(task.comparison) : null,
     error_code: task.error?.code ?? null,
     error_message: task.error?.message ?? null,
     context_json: JSON.stringify(task.contextBundle),
@@ -176,6 +179,9 @@ export class SqliteTaskStore implements TaskStore {
       );
     `);
     const taskColumns = this.#db.prepare("PRAGMA table_info(tasks)").all() as Row[];
+    if (!taskColumns.some((column) => String(column.name) === "comparison_json")) {
+      this.#db.exec("ALTER TABLE tasks ADD COLUMN comparison_json TEXT");
+    }
     if (
       !taskColumns.some(
         (column) => String(column.name) === "pre_restricted_fingerprint",
@@ -196,12 +202,14 @@ export class SqliteTaskStore implements TaskStore {
           parent_task_id, agent_adapter, agent_session_id, pre_head, pre_index_tree,
           pre_restricted_fingerprint, before_ref, after_ref, changed_files_json,
           verification_status, error_code, error_message, context_json, diff_text,
+          comparison_json,
           created_at, started_at, completed_at
         ) VALUES (
           $id, $project_id, $status, $request_text, $scope, $origin_browser_session_id,
           $parent_task_id, $agent_adapter, $agent_session_id, $pre_head, $pre_index_tree,
           $pre_restricted_fingerprint, $before_ref, $after_ref, $changed_files_json,
           $verification_status, $error_code, $error_message, $context_json, $diff_text,
+          $comparison_json,
           $created_at, $started_at, $completed_at
         )
       `)
@@ -231,6 +239,7 @@ export class SqliteTaskStore implements TaskStore {
           after_ref = $after_ref,
           changed_files_json = $changed_files_json,
           verification_status = $verification_status,
+          comparison_json = $comparison_json,
           error_code = $error_code,
           error_message = $error_message,
           context_json = $context_json,

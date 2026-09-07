@@ -28,6 +28,7 @@ import {
 } from "./bridge.js";
 import { compactText } from "./helpers.js";
 import { viewerStyles } from "./viewer-styles.js";
+import { ComparisonPanel } from "./comparison-panel.js";
 
 type TaskFilter = "all" | "active" | "review" | "issue";
 const TASK_PAGE_SIZE = 100;
@@ -816,6 +817,7 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
                     </div>
                   ) : null}
 
+                  {selectedTask.comparison ? <ComparisonPanel key={selectedTask.id} state={selectedTask.comparison} token={token} options={requestOptions} /> : null}
                   <section class="files-block" aria-labelledby="files-title">
                     <header>
                       <h3 id="files-title">변경 파일</h3>

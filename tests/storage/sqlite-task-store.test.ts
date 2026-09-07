@@ -37,6 +37,27 @@ function storedTask(): StoredTask {
 }
 
 describe("SqliteTaskStore", () => {
+  it("migrates and persists comparison state without altering ordinary tasks", async () => {
+    const fixture = await createFixtureRepository();
+    const database = resolve(fixture.parent, "comparison.sqlite");
+    let store = new SqliteTaskStore(database);
+    store.createTask(storedTask());
+    store.close();
+    const legacy = new DatabaseSync(database);
+    legacy.exec("ALTER TABLE tasks DROP COLUMN comparison_json");
+    legacy.close();
+    store = new SqliteTaskStore(database);
+    expect(store.getTask("persisted-task")?.comparison).toBeUndefined();
+    const comparison = { status: "blocked" as const, url: "https://www.figma.com/design/ABC/frame?node-id=1-2", iteration: 0, maxIterations: 4, iterations: [], message: "Browser disconnected" };
+    store.updateTask("persisted-task", { comparison });
+    store.close();
+    store = new SqliteTaskStore(database);
+    expect(store.getTask("persisted-task")?.comparison).toEqual(comparison);
+    expect(store.getTask("persisted-task")?.requestText).toBe("Change it");
+    store.close();
+    await rm(fixture.parent, { recursive: true });
+  });
+
   it("paginates task history with a stable timestamp and id cursor", () => {
     const store = new SqliteTaskStore(":memory:");
     for (const [id, createdAt] of [

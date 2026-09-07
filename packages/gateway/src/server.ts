@@ -55,6 +55,7 @@ const VIEWER_CONTENT_SECURITY_POLICY = [
   "script-src 'self'",
   "style-src 'unsafe-inline'",
   "connect-src 'self'",
+  "img-src blob:",
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'none'",
@@ -615,7 +616,7 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
   const injectOverlay = options.injectOverlay ?? true;
   const controlWebSocketServer = new WebSocketServer({
     noServer: true,
-    maxPayload: MAX_CONTROL_BODY_BYTES,
+    maxPayload: 24 * 1024 * 1024,
   });
   const controlSockets = new Set<WebSocket>();
   const proxy = httpProxy.createProxyServer({
@@ -861,6 +862,12 @@ export function createGatewayServer(options: GatewayOptions): GatewayServer {
       });
 
       webSocket.once("message", (data) => {
+        const bytes = Array.isArray(data) ? data.reduce((total, chunk) => total + chunk.length, 0) : data.byteLength;
+        if (bytes > MAX_CONTROL_BODY_BYTES) {
+          clearTimeout(timeout);
+          webSocket.close(1009, "Initial session frame exceeds one MiB");
+          return;
+        }
         const access = authMode === "local"
           ? parseLocalSession(data)
           : tokenAccess(parseWebSocketAuth(data), options.pairingToken, viewerSessions, Date.now());

@@ -1,6 +1,6 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { parse, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -34,9 +34,14 @@ function input(
 }
 
 describe("CodexAdapter", () => {
-  it("uses the pinned safe exec shape and feeds the prompt on stdin", async () => {
+  it.each([false, true])("uses safe fresh/resume argv with artifact access %s", async (withArtifacts) => {
     const directory = await mkdtemp(resolve(tmpdir(), "visual-codex-test-"));
     const initialExitListeners = process.listenerCount("exit");
+    const artifactDirectory = resolve(`${directory} artifacts`, "task-test");
+    const runInput = {
+      ...input(directory),
+      ...(withArtifacts ? { artifactDirectory } : {}),
+    };
     try {
       const command = await executable(
         directory,
@@ -56,7 +61,7 @@ console.log(JSON.stringify({
         directExecMcpScript: false,
       });
       const events: NormalizedAgentEvent[] = [];
-      for await (const event of adapter.run(input(directory), new AbortController().signal)) {
+      for await (const event of adapter.run(runInput, new AbortController().signal)) {
         events.push(event);
       }
       expect(events[0]).toEqual({ type: "session", sessionId: "thread-test" });
@@ -73,6 +78,7 @@ console.log(JSON.stringify({
         "workspace-write",
         "-C",
         directory,
+        ...(withArtifacts ? ["--add-dir", artifactDirectory] : []),
         "-",
       ]);
       expect(record.body).toBe("edit the requested UI");
@@ -80,7 +86,7 @@ console.log(JSON.stringify({
 
       const resumed: NormalizedAgentEvent[] = [];
       for await (const event of adapter.resume(
-        { ...input(directory), sessionId: "thread-test" },
+        { ...runInput, sessionId: "thread-test" },
         new AbortController().signal,
       )) {
         resumed.push(event);
@@ -97,6 +103,7 @@ console.log(JSON.stringify({
         "workspace-write",
         "-C",
         directory,
+        ...(withArtifacts ? ["--add-dir", artifactDirectory] : []),
         "resume",
         "thread-test",
         "-",
@@ -107,6 +114,23 @@ console.log(JSON.stringify({
       await rm(directory, { recursive: true });
     }
   });
+
+  it.each(["", "relative/artifacts", parse(tmpdir()).root, `${parse(tmpdir()).root}tmp/..`])(
+    "rejects unsafe artifact directory %j before starting fresh or resumed runs",
+    async (artifactDirectory) => {
+      const adapter = new CodexAdapter({ executable: "must-not-start", rtkExecutable: false });
+      const runInput = { ...input(tmpdir()), artifactDirectory };
+      const signal = new AbortController().signal;
+      for (const events of [
+        adapter.run(runInput, signal),
+        adapter.resume({ ...runInput, sessionId: "thread-test" }, signal),
+      ]) {
+        await expect(events[Symbol.asyncIterator]().next()).rejects.toThrow(
+          "Artifact directory must be an absolute non-root path",
+        );
+      }
+    },
+  );
 
   it("registers the bounded direct-exec MCP server for each Codex run", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "visual-codex-direct-test-"));

@@ -2,6 +2,11 @@
 import { visualBridgeColorTokens } from "./design-tokens.js";
 
 export const overlayStyles = String.raw`
+  .comparison-request { display: grid; gap: 8px; margin: 10px 0 14px; }
+  .comparison-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .comparison-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--dispatch); }
+  .comparison-url { width: 100%; min-width: 0; padding: 8px; color: var(--ink); background: var(--strip-strong); border: 1px solid var(--rule); border-radius: 3px; font: inherit; }
+  .comparison-request input:focus-visible { outline: 3px solid var(--strip-strong); outline-offset: 2px; box-shadow: 0 0 0 5px var(--dispatch-dark); }
   :host {
     all: initial;
     position: fixed;

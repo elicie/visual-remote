@@ -424,6 +424,14 @@ async function authorizedFetch(
   return response;
 }
 
+export async function fetchComparisonImage(token: string, artifactId: string, signal: AbortSignal, options: BridgeRequestOptions): Promise<Blob> {
+  const response = await authorizedFetch(token, `/_visual/api/artifacts/${encodeURIComponent(artifactId)}`, { signal }, options);
+  if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("image/png")) throw new Error("비교 이미지가 PNG 형식이 아닙니다.");
+  const blob = await response.blob();
+  if (blob.size > 16 * 1024 * 1024) throw new Error("비교 이미지가 허용 크기를 초과했습니다.");
+  return blob;
+}
+
 async function responseValue(response: Response): Promise<unknown> {
   const text = await response.text();
   return text ? safeJsonParse(text) : null;

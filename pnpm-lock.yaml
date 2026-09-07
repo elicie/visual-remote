@@ -14,6 +14,9 @@ importers:
       http-proxy:
         specifier: ^1.18.1
         version: 1.18.1
+      pngjs:
+        specifier: 7.0.0
+        version: 7.0.0
       ws:
         specifier: ^8.21.1
         version: 8.21.1
@@ -33,6 +36,9 @@ importers:
       '@types/node':
         specifier: ^26.1.2
         version: 26.1.2
+      '@types/pngjs':
+        specifier: 6.0.5
+        version: 6.0.5
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
@@ -109,6 +115,9 @@ importers:
       '@visual-remote/protocol':
         specifier: workspace:*
         version: link:../protocol
+      pngjs:
+        specifier: 7.0.0
+        version: 7.0.0
       ws:
         specifier: ^8.21.1
         version: 8.21.1
@@ -122,6 +131,9 @@ importers:
       '@types/node':
         specifier: ^26.1.2
         version: 26.1.2
+      '@types/pngjs':
+        specifier: 6.0.5
+        version: 6.0.5
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
@@ -700,6 +712,9 @@ packages:
   '@types/node@26.1.2':
     resolution: {integrity: sha512-Vu4a5UFA9rIIFJ7rB/Vaafh9lrCQszopTCx6KjFboXTGQbPNasehVR5TEiithSDGyd1DEiUByggTZsg8jukeIg==}
 
+  '@types/pngjs@6.0.5':
+    resolution: {integrity: sha512-0k5eKfrA83JOZPppLtS2C7OUtyNAl2wKNxfyYl9Q5g9lPkgBl/9hNyAu6HuEH2J4XmIv2znEpkDd0SaZVxW6iQ==}
+
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
@@ -1053,6 +1068,10 @@ packages:
     resolution: {integrity: sha512-0M+L3LAD8/nm554LOla9Ayx0j0tmFZ0FBcoQ7F1VuVHpM/XpiC8RcDzBQB8W5+hA8L22THxELzeF+2WcUzvcLg==}
     engines: {node: '>=20'}
     hasBin: true
+
+  pngjs@7.0.0:
+    resolution: {integrity: sha512-LKWqWJRhstyYo9pGvgor/ivk2w94eSjE3RGVuzLGlr3NmD8bf7RcYGze1mNdEHRP6TRP6rMuDHk5t44hnTRyow==}
+    engines: {node: '>=14.19.0'}
 
   postcss@8.4.31:
     resolution: {integrity: sha512-PS08Iboia9mts/2ygV3eLpY5ghnUcfLV/EXTOW1E2qYxJKGGBUtNjN76FYHnMs36RmARn41bC0AZmn+rR0OVpQ==}
@@ -1583,6 +1602,10 @@ snapshots:
     dependencies:
       undici-types: 8.3.0
 
+  '@types/pngjs@6.0.5':
+    dependencies:
+      '@types/node': 26.1.2
+
   '@types/ws@8.18.1':
     dependencies:
       '@types/node': 26.1.2
@@ -1855,6 +1878,8 @@ snapshots:
       playwright-core: 1.62.1
     optionalDependencies:
       fsevents: 2.3.2
+
+  pngjs@7.0.0: {}
 
   postcss@8.4.31:
     dependencies:

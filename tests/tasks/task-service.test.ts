@@ -1,3 +1,5 @@
+import type * as PngModule from "pngjs";
+import { createRequire } from "node:module";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +15,7 @@ import {
   type StoredTask,
 } from "@visual-remote/bridge-core";
 import type { ContextBundle, TaskStatus } from "@visual-remote/protocol";
+import { normalizeComparisonRequest } from "@visual-remote/protocol";
 import { createFixtureRepository } from "../git/helpers.js";
 
 function context(request: string, browserOffset = 1): ContextBundle {
@@ -52,6 +55,69 @@ describe("TaskService", () => {
 
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map(async (path) => await rm(path, { recursive: true })));
+  });
+
+  it("normalizes frame links and honors an explicit disabled override", () => {
+    const url = "https://www.figma.com/design/ABC/frame?node-id=1-2";
+    expect(normalizeComparisonRequest(`Match ${url}`)).toMatchObject({ enabled: true, url, maxIterations: 4 });
+    expect(normalizeComparisonRequest(`Match ${url}`, { enabled: false })?.enabled).toBe(false);
+    expect(() => normalizeComparisonRequest("https://www.figma.com/design/ABC/frame")).toThrow("node-id");
+    expect(() => normalizeComparisonRequest("match", { enabled: true, url: "https://evil.test/design/ABC?node-id=1-2" })).toThrow("full");
+  });
+
+  it("runs preparation and correction inside one snapshot pair with real image evidence", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const root = resolve(fixture.parent, "comparisons");
+    const manager = await GitTransactionManager.open(fixture.root);
+    const snapshots = vi.spyOn(manager, "createSnapshot");
+    const requireCore = createRequire(resolve("packages/bridge-core/package.json"));
+    const { PNG } = requireCore("pngjs") as typeof PngModule;
+    const image = new PNG({ width: 3, height: 3 });
+    image.data.fill(255);
+    const bytes = PNG.sync.write(image);
+    const differentImage = new PNG({ width: 3, height: 3 });
+    for (let offset = 0; offset < differentImage.data.length; offset += 4) differentImage.data[offset + 3] = 255;
+    const differentBytes = PNG.sync.write(differentImage);
+    let captures = 0;
+    const url = "https://www.figma.com/design/ABC/frame?node-id=1-2";
+    let runs = 0;
+    const adapter = new FakeAgentAdapter(async (input) => {
+      runs++;
+      if (runs === 1) {
+        expect(input.prompt).not.toContain("change tracked content");
+        expect(input.artifactDirectory).toBe(resolve(root, input.taskId));
+        await writeFile(resolve(root, input.taskId, "reference.png"), bytes);
+        await writeFile(resolve(root, input.taskId, "reference.json"), JSON.stringify({ width: 3, height: 3, targets: [], sourceUrl: url, nodeId: "1:2" }));
+      } else {
+        expect(input.prompt).toContain("change tracked content");
+        await writeFile(resolve(fixture.root, "tracked.txt"), `comparison run ${runs}\n`);
+      }
+      return [{ type: "session", sessionId: "comparison-session" }];
+    });
+    const service = new TaskService({ projectId: "fixture-project", adapter, store: new SqliteTaskStore(":memory:"), git: manager, comparisonRoot: root,
+      captureComparison: async (taskId, _context, dimensions) => ({ requestId: crypto.randomUUID(), taskId, ...dimensions, targets: [], pngBase64: (++captures === 1 ? differentBytes : bytes).toString("base64") }),
+    });
+    const task = service.create(context(`change tracked content to match ${url}`));
+    await service.waitForIdle();
+    expect(service.get(task.id)).toMatchObject({ status: "review", comparison: { status: "passed", iteration: 2 } });
+    expect(runs).toBe(3);
+    expect(snapshots.mock.calls.map((call) => call[1])).toEqual(["before", "after"]);
+    expect(service.diff(task.id)).toContain("comparison run 3");
+    const state = service.get(task.id)!.comparison!;
+    expect(await service.getArtifact(state.iterations[0]!.referenceArtifactId)).toBeDefined();
+    expect(JSON.stringify(service.replay())).not.toContain(bytes.toString("base64"));
+    await service.close();
+  });
+
+  it("blocks unavailable reference access rather than reporting a fabricated pass", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const service = new TaskService({ projectId: "fixture-project", adapter: new FakeAgentAdapter(), store: new SqliteTaskStore(":memory:"), git: await GitTransactionManager.open(fixture.root), comparisonRoot: resolve(fixture.parent, "comparisons") });
+    const task = service.create(context("Match https://www.figma.com/design/ABC/frame?node-id=1-2"));
+    await service.waitForIdle();
+    expect(service.get(task.id)).toMatchObject({ status: "failed", comparison: { status: "blocked", iterations: [] } });
+    await service.close();
   });
 
   it("runs one writer at a time and keeps each task diff isolated", async () => {
@@ -279,6 +345,7 @@ describe("TaskService", () => {
       originBrowserSessionId: context("recover").browserSessionId,
       agentAdapter: "fake",
       contextBundle: context("recover"),
+      comparison: { status: "passed", url: "https://www.figma.com/design/ABC/frame?node-id=1-2", iteration: 1, maxIterations: 4, iterations: [] },
       changedFiles: [],
       createdAt: "2026-01-01T00:00:00.000Z",
       startedAt: "2026-01-01T00:00:01.000Z",
@@ -305,6 +372,7 @@ describe("TaskService", () => {
     expect(service.get(interrupted.id)).toMatchObject({
       status: "failed",
       error: { code: "BRIDGE_INTERRUPTED" },
+      comparison: { status: "blocked" },
       beforeRef: before.ref,
       afterRef: expect.stringContaining("/after"),
       changedFiles: ["tracked.txt"],

@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import {
   ClaudeAdapter,
   CodexAdapter,
@@ -82,6 +83,7 @@ export async function createDefaultControlService(
     adapter: createAgentAdapter(loaded.config.agent),
     store,
     git,
+    comparisonRoot: resolve(storagePaths.logsDirectory, "..", "comparisons"),
     maxRunMs: loaded.config.agent.maxRunMs,
     maxPending: loaded.config.queue.maxPending,
     resumeMode: loaded.config.agent.resumeMode,
