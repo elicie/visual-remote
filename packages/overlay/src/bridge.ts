@@ -423,6 +423,7 @@ export async function fetchProjectId(token: string): Promise<string | undefined>
 export interface FetchTasksOptions {
   limit?: number;
   cursor?: Pick<TaskRecord, "createdAt" | "id">;
+  signal?: AbortSignal;
 }
 
 export async function fetchTasks(
@@ -438,7 +439,11 @@ export async function fetchTasks(
   const serializedSearch = search.toString();
   const query = serializedSearch ? `?${serializedSearch}` : "";
   const value = await responseValue(
-    await authorizedFetch(token, `/_visual/api/tasks${query}`),
+    await authorizedFetch(
+      token,
+      `/_visual/api/tasks${query}`,
+      options.signal ? { signal: options.signal } : undefined,
+    ),
   );
   const record = recordOf(value);
   const tasks = Array.isArray(value)
@@ -470,8 +475,9 @@ export async function fetchTasks(
 export async function fetchLatestTaskForSession(
   token: string,
   browserSessionId: string,
+  signal?: AbortSignal,
 ): Promise<TaskRecord | undefined> {
-  const tasks = await fetchTasks(token);
+  const tasks = await fetchTasks(token, signal ? { signal } : undefined);
 
   for (const candidate of tasks) {
     if (candidate.originBrowserSessionId === browserSessionId) {

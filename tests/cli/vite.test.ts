@@ -18,7 +18,14 @@ async function responseStatus(url: string): Promise<number> {
 }
 
 describe("Visual Remote Vite integration", () => {
-  it("keeps the original app origin and proxies only Visual Remote routes", async () => {
+  it.each([
+    { mode: "same plugin", failure: "none" },
+    { mode: "reloaded config", failure: "none" },
+    { mode: "same plugin", failure: "close" },
+    { mode: "reloaded config", failure: "close" },
+    { mode: "same plugin", failure: "recover" },
+    { mode: "reloaded config", failure: "recover" },
+  ])("keeps the owned Bridge lifecycle correct with $mode and $failure restart failure", async ({ mode, failure }) => {
     const root = await mkdtemp(join(tmpdir(), "visual-vite-"));
     await execFileAsync("git", ["init", "--quiet", root]);
     await writeFile(
@@ -40,9 +47,35 @@ describe("Visual Remote Vite integration", () => {
 
     const appPort = await findAvailablePort(31_000 + (process.pid % 1_000), "127.0.0.1");
     const bridgePort = await findAvailablePort(appPort + 1, "127.0.0.1");
+    let pluginInstances = 0;
+    const pluginFactory = () => {
+      pluginInstances += 1;
+      return visualRemote({ cwd: root, bridgeHost: "127.0.0.1", bridgePort });
+    };
+    const factoryKey = Symbol.for(`visual-vite-test:${root}`);
+    const factories = globalThis as typeof globalThis & {
+      [factoryKey]?: () => Plugin;
+    };
+    const configFile = mode === "reloaded config" ? join(root, "vite.config.mjs") : false;
+    if (configFile !== false) {
+      factories[factoryKey] = pluginFactory;
+      await writeFile(
+        configFile,
+        `export default () => ({ plugins: [globalThis[Symbol.for(${JSON.stringify(`visual-vite-test:${root}`)})]()] });`,
+        "utf8",
+      );
+    }
+    let configureCalls = 0;
+    const restartErrors: string[] = [];
+    const logger = createLogger("silent");
+    logger.error = (message) => { restartErrors.push(message); };
     const apiFixture: Plugin = {
       name: "api-fixture",
       configureServer(server) {
+        configureCalls += 1;
+        if (failure !== "none" && configureCalls === 2) {
+          throw new Error("replacement configureServer failed");
+        }
         server.middlewares.use((request, response, next) => {
           if (request.url !== "/api/ping") {
             next();
@@ -55,8 +88,8 @@ describe("Visual Remote Vite integration", () => {
     };
     const server = await createServer({
       root,
-      configFile: false,
-      customLogger: createLogger("silent"),
+      configFile,
+      customLogger: logger,
       server: {
         host: "127.0.0.1",
         port: appPort,
@@ -64,7 +97,7 @@ describe("Visual Remote Vite integration", () => {
       },
       plugins: [
         apiFixture,
-        visualRemote({ cwd: root, bridgeHost: "127.0.0.1", bridgePort }),
+        ...(configFile === false ? [pluginFactory()] : []),
       ],
     });
 
@@ -80,9 +113,31 @@ describe("Visual Remote Vite integration", () => {
       expect(await responseStatus(`${origin}/@vite/client`)).toBe(200);
       expect(await responseStatus(`${origin}/_visual/client.js`)).toBe(200);
       expect(await responseStatus(`${origin}/_visual/viewer`)).toBe(200);
+      const originalInstance = await readInstance(root);
+      expect(originalInstance?.gatewayUrl).toBe(`http://127.0.0.1:${bridgePort}`);
+      if (failure !== "none") {
+        await server.restart();
+        expect(restartErrors).toContain("replacement configureServer failed");
+        expect(restartErrors).toContain("server restart failed");
+        expect(await responseStatus(`${origin}/_visual/client.js`)).toBe(200);
+        expect(await responseStatus(`${origin}/api/ping`)).toBe(200);
+        expect((await readInstance(root))?.startedAt).toBe(originalInstance?.startedAt);
+      }
+      const successfulRestarts = failure === "close" ? 0 : 2;
+      for (let restart = 0; restart < successfulRestarts; restart += 1) {
+        await server.restart();
+        expect(await responseStatus(`${origin}/_visual/client.js`)).toBe(200);
+        expect(await responseStatus(`${origin}/api/ping`)).toBe(200);
+        expect((await readInstance(root))?.startedAt).toBe(originalInstance?.startedAt);
+      }
+      expect(configureCalls).toBe(1 + successfulRestarts + (failure === "none" ? 0 : 1));
+      expect(pluginInstances).toBe(mode === "reloaded config" ? configureCalls : 1);
     } finally {
       await server.close();
+      delete factories[factoryKey];
     }
+    expect(await readInstance(root)).toBeUndefined();
+    await expect(fetch(`http://127.0.0.1:${bridgePort}/_visual/client.js`)).rejects.toThrow();
   });
 
   it("reuses a registered Bridge without taking ownership of its lifecycle", async () => {
@@ -142,6 +197,9 @@ describe("Visual Remote Vite integration", () => {
       expect(await responseStatus(`http://127.0.0.1:${appPort}/_visual/client.js`)).toBe(
         200,
       );
+      expect((await readInstance(root))?.gatewayUrl).toBe(owner.gatewayUrl);
+      await server.restart();
+      expect(await responseStatus(`http://127.0.0.1:${appPort}/_visual/client.js`)).toBe(200);
       expect((await readInstance(root))?.gatewayUrl).toBe(owner.gatewayUrl);
 
       await server.close();
