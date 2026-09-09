@@ -62,6 +62,9 @@ export const visualDevConfigSchema = z
             "Expected a Codex profile name",
           )
           .optional(),
+        permissionMode: z
+          .enum(["default", "acceptEdits", "bypassPermissions"])
+          .optional(),
         inheritEnv: z.array(environmentVariableSchema).default([]),
         maxRunMs: z.number().int().positive(),
         resumeMode: z.enum(["auto", "new"]).default("auto"),
@@ -80,6 +83,13 @@ export const visualDevConfigSchema = z
             code: "custom",
             path: ["reasoningEffort"],
             message: "max reasoning effort is only supported by the Claude adapter",
+          });
+        }
+        if (agent.adapter !== "claude" && agent.permissionMode !== undefined) {
+          context.addIssue({
+            code: "custom",
+            path: ["permissionMode"],
+            message: "agent.permissionMode is only supported by the Claude adapter",
           });
         }
         if (agent.adapter !== "codex" && agent.profile !== undefined) {
@@ -108,6 +118,12 @@ export const visualDevConfigSchema = z
       .object({
         hmrWaitMs: z.number().int().nonnegative(),
         commands: z.array(verificationCommandSchema),
+        /**
+         * Which browser captures the app for Figma comparison: `ego` uses the
+         * ego lite CLI and its login state, `playwright` the separate Chrome
+         * profile, and `auto` picks ego lite whenever `ego-browser` is installed.
+         */
+        browser: z.enum(["auto", "playwright", "ego"]).default("auto"),
       })
       .strict(),
     paths: z
@@ -148,7 +164,7 @@ export function createDefaultConfig(projectId: string): VisualDevConfig {
     agent: {
       adapter: "codex",
       inheritEnv: [],
-      maxRunMs: 900_000,
+      maxRunMs: 1_800_000,
       resumeMode: "auto",
     },
     queue: {
@@ -164,6 +180,7 @@ export function createDefaultConfig(projectId: string): VisualDevConfig {
     verification: {
       hmrWaitMs: 12_000,
       commands: [],
+      browser: "auto",
     },
     paths: {
       allowed: [

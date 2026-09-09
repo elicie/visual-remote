@@ -793,6 +793,85 @@ describe("TaskService", () => {
     await service.close();
   });
 
+  it("commits a reviewed task with a default message, records the sha and refuses unsafe repeats", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const manager = await GitTransactionManager.open(fixture.root);
+    const adapter = new FakeAgentAdapter(async function* () {
+      await writeFile(resolve(fixture.root, "tracked.txt"), "committed by task\n");
+      yield { type: "complete" };
+    });
+    const store = new SqliteTaskStore(resolve(fixture.parent, "state.sqlite"));
+    const service = new TaskService({ projectId: "fixture-project", adapter, store, git: manager });
+    const events: string[] = [];
+    service.subscribe((event) => events.push(event.type));
+    const task = service.create(context("버튼 색을   브랜드 색으로\n바꿔줘"));
+    await service.waitForIdle();
+    expect(service.get(task.id)?.status).toBe("review");
+
+    const committed = await service.commit(task.id);
+    expect(committed.status).toBe("accepted");
+    expect(committed.commit).toMatchObject({ message: `버튼 색을 브랜드 색으로 바꿔줘\n\nVisual Remote task ${task.id}\n` });
+    expect(committed.commit?.sha).toBe(await fixture.git(["rev-parse", "HEAD"]));
+    expect(await fixture.git(["log", "-1", "--format=%s"])).toBe("버튼 색을 브랜드 색으로 바꿔줘");
+    expect(events).toContain("task.committed");
+    expect(store.getTask(task.id)?.commit).toEqual(committed.commit);
+
+    await expect(service.commit(task.id, "again")).resolves.toMatchObject({ commit: committed.commit });
+    expect(await fixture.git(["rev-list", "--count", "HEAD"])).toBe("2");
+    await expect(service.commit("missing")).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+
+    const reopened = new SqliteTaskStore(resolve(fixture.parent, "state.sqlite"));
+    expect(reopened.getTask(task.id)?.commit).toEqual(committed.commit);
+    reopened.close();
+    await service.close();
+  });
+
+  it("waits for the task's own verification hold before committing instead of reporting a busy writer", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const adapter = new FakeAgentAdapter(async function* () {
+      await writeFile(resolve(fixture.root, "tracked.txt"), "held\n");
+      yield { type: "complete" };
+    });
+    const service = new TaskService({ projectId: "fixture-project", adapter, store: new SqliteTaskStore(":memory:"), git: await GitTransactionManager.open(fixture.root) });
+    const task = service.create(context("held"));
+    const release = service.holdWriter(task.id);
+    await waitForStatus(service, task.id, "review");
+
+    let settled = false;
+    const commit = service.commit(task.id, "held change").finally(() => {
+      settled = true;
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    expect(settled).toBe(false);
+    release();
+    await expect(commit).resolves.toMatchObject({ status: "accepted", commit: { message: "held change" } });
+    expect(await fixture.git(["log", "-1", "--format=%s"])).toBe("held change");
+    await service.close();
+  });
+
+  it("rejects commits for reverted tasks and surfaces conflicts as errors", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const manager = await GitTransactionManager.open(fixture.root);
+    const adapter = new FakeAgentAdapter(async function* () {
+      await writeFile(resolve(fixture.root, "tracked.txt"), "task output\n");
+      yield { type: "complete" };
+    });
+    const service = new TaskService({ projectId: "fixture-project", adapter, store: new SqliteTaskStore(":memory:"), git: manager });
+    const task = service.create(context("conflict"));
+    await service.waitForIdle();
+    await writeFile(resolve(fixture.root, "tracked.txt"), "user edit after task\n");
+    await expect(service.commit(task.id, "x".repeat(4_001))).rejects.toMatchObject({ code: "COMMIT_MESSAGE_TOO_LONG" });
+    await expect(service.commit(task.id, "should conflict")).rejects.toMatchObject({ code: "COMMIT_CONFLICT" });
+    expect(service.get(task.id)?.commit).toBeUndefined();
+    await writeFile(resolve(fixture.root, "tracked.txt"), "task output\n");
+    await service.revert(task.id);
+    await expect(service.commit(task.id)).rejects.toMatchObject({ code: "TASK_NOT_COMMITTABLE" });
+    await service.close();
+  });
+
   it("reverts only the latest completed task and refuses conflicts", async () => {
     const fixture = await createFixtureRepository();
     cleanups.push(fixture.parent);

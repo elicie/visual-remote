@@ -31,6 +31,7 @@ export interface ControlService {
   approveTaskTools?(taskId: string, payload: unknown): Awaitable<unknown>;
   acceptTask?(taskId: string): Awaitable<unknown | undefined>;
   revertTask?(taskId: string): Awaitable<unknown | undefined>;
+  commitTask?(taskId: string, payload: unknown): Awaitable<unknown | undefined>;
   getArtifact?(artifactId: string): Awaitable<ControlArtifact | undefined>;
   connectWebSocket?(
     connection: AuthenticatedControlSocket,

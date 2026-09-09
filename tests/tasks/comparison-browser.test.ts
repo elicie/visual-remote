@@ -324,6 +324,27 @@ describe("dedicated persistent verification browser", () => {
     await f.manager.begin(randomUUID(), ctx, signal);
   }, 60_000);
 
+  it("adopts the reference size as the viewport in page mode and explains element size mismatches", async () => {
+    const f = await fixture(), signal = new AbortController().signal;
+    const page = context();
+    page.selection = { mode: "page", targets: page.selection.targets };
+    const id = randomUUID();
+    await f.manager.begin(id, page, signal);
+    expect(await f.manager.measure(id, page, signal)).toEqual({ x: 0, y: 0, width: 320, height: 240 });
+    const result = await f.manager.capture(id, page, { width: 400, height: 300 }, signal);
+    const image = decodePng(Buffer.from(result.pngBase64!, "base64"));
+    expect([image.width, image.height]).toEqual([400, 300]);
+    expect(await owned(f.manager).active!.page.evaluate(() => [innerWidth, innerHeight])).toEqual([400, 300]);
+    await f.manager.finish(id);
+
+    const element = context(), elementId = randomUUID();
+    await f.manager.begin(elementId, element, signal);
+    expect(await f.manager.measure(elementId, element, signal)).toEqual({ x: 20, y: 30, width: 120, height: 60 });
+    await expect(f.manager.capture(elementId, element, { width: 400, height: 300 }, signal)).rejects.toThrow(
+      /120×60px must be fully visible and exactly match reference 400×300px\. Pixel comparison needs identical sizes: select a target or region/,
+    );
+  }, 60_000);
+
   it("captures a scrolled region in CSS pixels and rejects impossible scroll", async () => {
     const f = await fixture(), ctx = context(), signal = new AbortController().signal;
     ctx.page.scroll.y = 20;

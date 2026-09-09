@@ -68,9 +68,14 @@ const selectionSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("page"), targets: z.array(targetContextSchema).max(20) }),
 ]);
 
+export const verificationBrowserKindSchema = z.enum(["playwright", "ego"]);
+export type VerificationBrowserKind = z.infer<typeof verificationBrowserKindSchema>;
+
 export const comparisonRequestSchema = z.object({
   enabled: z.boolean(),
   url: z.string().optional(),
+  /** Which verification browser captures the app; the Bridge default applies when omitted. */
+  browser: verificationBrowserKindSchema.optional(),
   maxIterations: z.number().int().min(1).max(20).default(4),
   targetMatch: z.number().min(0).max(100).default(99),
   threshold: z.number().int().min(0).max(255).default(30),
@@ -107,6 +112,8 @@ export interface CaptureResult {
 export interface ComparisonIteration {
   iteration: number; overallMatch: number; regions: Record<string, number>; structuralMismatches: number; missingTargets: number;
   issues: string[]; referenceArtifactId: string; screenshotArtifactId: string; heatmapArtifactId: string; overlayArtifactId: string;
+  /** Set when the browser capture had to be resampled to the reference size. */
+  scaled?: { width: number; height: number };
 }
 export interface ComparisonState {
   status: "preparing" | "capturing" | "comparing" | "correcting" | "passed" | "unmatched" | "blocked" | "canceled";
@@ -171,6 +178,7 @@ export const clientMessageSchema = z.object({
     "task.cancel",
     "task.accept",
     "task.revert",
+    "task.commit",
     "task.follow_up",
   ]),
   browserSessionId: z.string().uuid(),
@@ -204,7 +212,15 @@ export interface TaskRecord {
   comparison?: ComparisonState;
   error?: { code: string; message: string };
   permissionDeniedTools?: string[];
+  commit?: TaskCommit;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
+}
+
+/** A Git commit created from a task's kept changes. */
+export interface TaskCommit {
+  sha: string;
+  message: string;
+  committedAt: string;
 }

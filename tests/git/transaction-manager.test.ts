@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   GitTransactionManager,
   PathPolicy,
+  CommitConflictError,
   RevertConflictError,
   rebaseWorkspacePatterns,
 } from "@visual-remote/bridge-core";
@@ -74,6 +75,42 @@ describe("GitTransactionManager", () => {
     await expect(stat(resolve(fixture.root, "new.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("commits only the task's files with the user's identity and leaves other changes alone", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    await fixture.write("untouched.txt", "user work in progress\n");
+    const manager = await GitTransactionManager.open(fixture.root);
+    const before = await manager.createSnapshot("task-commit", "before");
+    await fixture.write("tracked.txt", "task version\n");
+    await fixture.write("new.txt", "created by task\n");
+    await rm(resolve(fixture.root, "delete.txt"));
+    const after = await manager.createSnapshot("task-commit", "after");
+    await fixture.write("untouched.txt", "user work still in progress\n");
+
+    const result = await manager.commit(before.ref, after.ref, "feat: task change\n\nVisual Remote task task-commit\n");
+    expect(result.files.sort()).toEqual(["delete.txt", "new.txt", "tracked.txt"]);
+    expect(await fixture.git(["rev-parse", "HEAD"])).toBe(result.sha);
+    expect(await fixture.git(["log", "-1", "--format=%an <%ae>"])).toBe("Visual Test <visual-test@example.invalid>");
+    expect(await fixture.git(["log", "-1", "--format=%B"])).toBe("feat: task change\n\nVisual Remote task task-commit");
+    expect((await fixture.git(["show", "--name-status", "--format=", "HEAD"])).split("\n").sort()).toEqual([
+      "A\tnew.txt", "D\tdelete.txt", "M\ttracked.txt",
+    ]);
+    expect(await fixture.git(["status", "--porcelain"])).toBe("?? untouched.txt");
+  });
+
+  it("refuses to commit task files the user changed afterwards and rejects empty messages", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    const manager = await GitTransactionManager.open(fixture.root);
+    const before = await manager.createSnapshot("task-conflict", "before");
+    await fixture.write("tracked.txt", "task version\n");
+    const after = await manager.createSnapshot("task-conflict", "after");
+    await expect(manager.commit(before.ref, after.ref, "   ")).rejects.toMatchObject({ code: "EMPTY_COMMIT_MESSAGE" });
+    await fixture.write("tracked.txt", "user version after task\n");
+    await expect(manager.commit(before.ref, after.ref, "change")).rejects.toBeInstanceOf(CommitConflictError);
+    expect(await fixture.git(["log", "--oneline"])).not.toContain("change");
+  });
+
   it("refuses to overwrite a file changed after the after snapshot", async () => {
     const fixture = await createFixtureRepository();
     cleanups.push(fixture.parent);
@@ -99,6 +136,33 @@ describe("GitTransactionManager", () => {
     const guard = await manager.captureGuard();
     await writeFile(resolve(fixture.root, ".env"), "SECRET=after\n");
 
+    await expect(manager.verifyGuard(guard)).resolves.toMatchObject({
+      safe: false,
+      restrictedPathsChanged: true,
+      restrictedPaths: [".env"],
+    });
+  });
+
+  it("ignores Git-ignored build artifacts outside the allowed paths but keeps denied ones guarded", async () => {
+    const fixture = await createFixtureRepository();
+    cleanups.push(fixture.parent);
+    await fixture.write(".gitignore", ".env\n*.tsbuildinfo\ncoverage/\n");
+    await fixture.git(["commit", "-qam", "ignore artifacts"]);
+    await fixture.write("tsconfig.tsbuildinfo", "{\"version\":1}\n");
+    await fixture.write("coverage/lcov.info", "TN:\n");
+    await fixture.write(".env", "SECRET=before\n");
+    const manager = await GitTransactionManager.open(fixture.root, { allowed: ["src/**"] });
+    const guard = await manager.captureGuard();
+
+    await writeFile(resolve(fixture.root, "tsconfig.tsbuildinfo"), "{\"version\":2}\n");
+    await writeFile(resolve(fixture.root, "coverage/lcov.info"), "TN:changed\n");
+    await expect(manager.verifyGuard(guard)).resolves.toMatchObject({
+      safe: true,
+      restrictedPathsChanged: false,
+      restrictedPaths: [],
+    });
+
+    await writeFile(resolve(fixture.root, ".env"), "SECRET=after\n");
     await expect(manager.verifyGuard(guard)).resolves.toMatchObject({
       safe: false,
       restrictedPathsChanged: true,

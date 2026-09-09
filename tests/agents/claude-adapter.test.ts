@@ -107,7 +107,7 @@ describe("ClaudeAdapter", () => {
         "-p", "--output-format", "stream-json", "--verbose",
         ...(withArtifacts ? ["--add-dir", artifactDirectory] : []),
         ...(approved ? ["--allowedTools", "mcp__figma__download,mcp__figma__get_node"] : []),
-        "--model", "sonnet", "--effort", "high",
+        "--model", "sonnet", "--effort", "high", "--permission-mode", "bypassPermissions",
       ]);
 
       const resumeEvents: NormalizedAgentEvent[] = [];
@@ -120,6 +120,37 @@ describe("ClaudeAdapter", () => {
       const resumed = invocation(resumeEvents);
       expect(resumed.args).toEqual([...run.args, "--resume", "claude-session"]);
       expect(resumed.body).toBe("edit the requested UI");
+    } finally {
+      await rm(directory, { recursive: true });
+    }
+  });
+
+  it.each(["default", "acceptEdits", "bypassPermissions"] as const)("passes permissionMode %s to fresh and resumed runs and defaults to bypassPermissions", async (permissionMode) => {
+    const directory = await mkdtemp(resolve(tmpdir(), "visual-claude-test-"));
+    try {
+      const exe = await executable(directory);
+      const events = async (adapter: ClaudeAdapter, resume = false) => {
+        const collected: NormalizedAgentEvent[] = [];
+        const source = resume
+          ? adapter.resume({ ...input(directory), sessionId: "claude-session" }, new AbortController().signal)
+          : adapter.run(input(directory), new AbortController().signal);
+        for await (const event of source) collected.push(event);
+        return invocation(collected).args;
+      };
+
+      const scoped = new ClaudeAdapter({ executable: exe, rtkExecutable: false, permissionMode });
+      expect(await events(scoped)).toEqual([
+        "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", permissionMode,
+      ]);
+      expect(await events(scoped, true)).toEqual([
+        "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", permissionMode,
+        "--resume", "claude-session",
+      ]);
+
+      const unscoped = new ClaudeAdapter({ executable: exe, rtkExecutable: false });
+      expect(await events(unscoped)).toEqual([
+        "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions",
+      ]);
     } finally {
       await rm(directory, { recursive: true });
     }
@@ -203,7 +234,7 @@ describe("ClaudeAdapter", () => {
           events.push(event);
         }
         const run = invocation(events);
-        expect(run.args).toEqual(["-p", "--output-format", "stream-json", "--verbose"]);
+        expect(run.args).toEqual(["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"]);
         expect(run.environment).toEqual({
           HOME: directory,
           CLAUDE_CONFIG_DIR: resolve(directory, "custom-config"),

@@ -17,6 +17,8 @@ export interface AgentPromptOptions {
   };
   allowedPatterns: readonly string[];
   deniedPatterns: readonly string[];
+  /** Path of the ego lite CLI when the Bridge detected it. */
+  egoBrowserExecutable?: string;
 }
 
 function sourceLabel(source: SourceLocation): string {
@@ -85,7 +87,7 @@ Runtime capabilities:
 - Repository inspection, file editing, and short-lived repository checks are available.
 - Browser, MCP, and external-reference access depend on the selected CLI's configured tools and permissions; use only tools actually available in this run.
 - When a browser session is connected, the Bridge performs its configured HMR and browser checks after editing.
-
+${options.egoBrowserExecutable ? `- ego lite is installed (${options.egoBrowserExecutable}). To look at the running app yourself, run \`ego-browser nodejs\` heredoc scripts (useOrCreateTaskSpace, openOrReuseTab, snapshotText, captureScreenshot, closeTab); it reuses the user's login state in an isolated task space. Measured design captures are still taken by the Bridge; do not start another browser for that.\n` : ""}
 Rules:
 - Inspect the relevant source before editing.
 - Preserve unrelated existing changes.

@@ -23,18 +23,23 @@ import type {
   Rect,
   ServerEvent,
   TargetContext,
+  TaskRecord,
   TaskStatus,
+  VerificationBrowserKind,
 } from "@visual-remote/protocol";
 import { normalizeComparisonRequest, type ComparisonRequest } from "@visual-remote/protocol";
 import {
   BridgeConnection,
   approveTaskTools,
   changedFilesFromEvent,
+  commitTask,
   consumePairingToken,
   createTaskPayload,
   fetchBootstrap,
   fetchLatestTaskForSession,
+  fetchTasks,
   fetchProjectId,
+  fetchVerificationInfo,
   fetchTaskArtifacts,
   fetchViewerUrl,
   getBrowserSessionId,
@@ -47,6 +52,7 @@ import {
   type BridgeBootstrap,
   type ConnectionSnapshot,
   type ConnectionState,
+  type VerificationBrowserInfo,
 } from "./bridge.js";
 import { LogText } from "./log-text.js";
 import {
@@ -61,10 +67,14 @@ import {
 } from "./context.js";
 import {
   calculatePopoverPosition,
+  clampDragPosition,
   compactText,
   normalizeRect,
+  orderTasks,
   parsePairingFragment,
   shouldSubmitOnEnter,
+  upsertTask,
+  type DragPosition,
   type Point,
   type PopoverPosition,
 } from "./helpers.js";
@@ -91,6 +101,7 @@ interface TaskView {
   error?: string;
   errorCode?: string;
   permissionDeniedTools?: string[];
+  commit?: TaskRecord["commit"];
   unavailableArtifacts?: Array<"files" | "diff" | "logs">;
 }
 
@@ -149,6 +160,59 @@ const TASK_HYDRATION_TIMEOUT_MS = 3_000;
 function eligibleDeniedTools(task: TaskView): string[] {
   if (task.status !== "failed" || task.errorCode !== "AGENT_PERMISSION_DENIED") return [];
   return [...new Set(task.permissionDeniedTools?.filter((tool) => tool.trim() === tool && /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/.test(tool)) ?? [])];
+}
+
+function isTaskRecord(value: unknown): value is TaskRecord {
+  const record = value as Partial<TaskRecord> | null | undefined;
+  return (
+    typeof record?.id === "string"
+    && typeof record.createdAt === "string"
+    && typeof record.requestText === "string"
+    && typeof record.status === "string"
+    && Array.isArray(record.changedFiles)
+  );
+}
+
+function taskTone(record: TaskRecord): "active" | "review" | "issue" | "done" {
+  if (ERROR_PHASES.has(record.status) || record.verificationStatus === "failed") return "issue";
+  if (ACTIVE_PHASES.has(record.status)) return "active";
+  if (record.status === "review") return "review";
+  return "done";
+}
+
+function taskTimeLabel(record: TaskRecord): string {
+  const date = new Date(record.completedAt ?? record.startedAt ?? record.createdAt);
+  if (Number.isNaN(date.getTime())) return "--:--";
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function viewFromRecord(record: TaskRecord): TaskView {
+  return {
+    id: record.id,
+    status: record.status,
+    requestText: record.requestText,
+    changedFiles: record.changedFiles,
+    logs: [],
+    diff: "",
+    ...(record.comparison ? { comparison: record.comparison } : {}),
+    ...(record.error?.code ? { errorCode: record.error.code } : {}),
+    ...(record.permissionDeniedTools ? { permissionDeniedTools: record.permissionDeniedTools } : {}),
+    ...(record.verificationStatus ? { verification: record.verificationStatus } : {}),
+    ...(record.error?.message ? { error: record.error.message } : {}),
+    ...(record.commit ? { commit: record.commit } : {}),
+  };
+}
+
+/** Same subject/body shape the Bridge uses when no message is given. */
+function suggestedCommitMessage(task: TaskView): string {
+  const flattened = task.requestText.replace(/\s+/g, " ").trim() || "Visual Remote change";
+  const subject = flattened.length > 72 ? `${flattened.slice(0, 71).trimEnd()}…` : flattened;
+  return task.id ? `${subject}\n\nVisual Remote task ${task.id}` : subject;
 }
 
 function eventIsFromOverlay(event: Event): boolean {
@@ -249,7 +313,8 @@ function RequestStrip({
   onScope,
   onSubmit,
   comparisonEnabled, comparisonUrl, comparisonError, browserMessage, browserError, browserBusy,
-  onComparisonEnabled, onComparisonUrl, onOpenBrowser,
+  browserKinds, browserKind, comparisonTarget, comparisonRounds,
+  onComparisonEnabled, onComparisonUrl, onOpenBrowser, onBrowserKind, onComparisonTarget, onComparisonRounds,
 }: {
   panelRef: preact.RefObject<HTMLDivElement>;
   position: PopoverPosition;
@@ -268,11 +333,19 @@ function RequestStrip({
   browserMessage: string;
   browserError: string;
   browserBusy: boolean;
+  browserKinds: VerificationBrowserKind[];
+  browserKind: VerificationBrowserKind | undefined;
+  comparisonTarget: number;
+  comparisonRounds: number;
   onComparisonEnabled: (enabled: boolean) => void;
   onComparisonUrl: (url: string) => void;
   onOpenBrowser: () => void;
+  onBrowserKind: (kind: VerificationBrowserKind) => void;
+  onComparisonTarget: (value: number) => void;
+  onComparisonRounds: (value: number) => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const drag = useDraggable();
   const first = selection[0];
   const pendingCount = selection.filter((item) => !item.context).length;
 
@@ -298,12 +371,30 @@ function RequestStrip({
 
   return (
     <section
-      ref={panelRef}
+      ref={(node: HTMLElement | null) => {
+        panelRef.current = node as HTMLDivElement | null;
+        drag.elementRef.current = node;
+      }}
       class="strip"
-      style={{ left: `${position.left}px`, top: `${position.top}px` }}
+      data-dragging={drag.dragging ? "true" : "false"}
+      style={
+        drag.position
+          ? { left: `${drag.position.left}px`, top: `${drag.position.top}px` }
+          : { left: `${position.left}px`, top: `${position.top}px` }
+      }
       aria-label={mode === "region" ? "영역 수정 요청 작성" : "수정 요청 작성"}
     >
-      <header class="strip-head">
+      <header
+        class="strip-head"
+        data-drag-handle="true"
+        title="드래그해서 패널을 옮길 수 있습니다"
+        {...drag.handlers}
+      >
+        <span class="strip-grip" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
         <span class="strip-title">
           {mode === "region" ? "드래그한 화면 영역" : sourceLabel(first)}
         </span>
@@ -362,9 +453,40 @@ function RequestStrip({
             <label class="field-label">Figma 프레임 링크
               <input class="comparison-url" type="url" value={comparisonUrl} placeholder="https://www.figma.com/design/…?node-id=1-2" onInput={(event) => onComparisonUrl(event.currentTarget.value)} />
             </label>
-            <p class="input-note">기본 기준: 전체·각 영역 99% 이상, 구조·누락 오류 0 · 최대 4회</p>
-            <button type="button" disabled={browserBusy} aria-busy={browserBusy} onClick={onOpenBrowser}>{browserBusy ? "검증 브라우저 여는 중…" : "검증 브라우저 열기"}</button>
-            <p class="input-note">별도 검증 브라우저에서 한 번 로그인하세요. 현재 탭은 그대로 유지되며, 비교 요청은 순서대로 처리됩니다.</p>
+            <div class="comparison-limits">
+              <label class="field-label">
+                픽셀 일치 목표 (%)
+                <input class="comparison-url" type="number" min={50} max={100} step={1} value={comparisonTarget} onInput={(event) => onComparisonTarget(Number(event.currentTarget.value))} />
+              </label>
+              <label class="field-label">
+                최대 수정 회차
+                <input class="comparison-url" type="number" min={1} max={20} step={1} value={comparisonRounds} onInput={(event) => onComparisonRounds(Number(event.currentTarget.value))} />
+              </label>
+            </div>
+            <p class="input-note">전체와 3×3 각 영역이 목표 이상이고 텍스트 위치·크기 불일치가 0이면 통과입니다. 회차 안에 못 미치면 실패가 아니라 가장 근접한 결과가 검토 대기로 남습니다.</p>
+            {browserKinds.includes("ego") ? (
+              <fieldset class="browser-choice">
+                <legend class="field-label">검증 브라우저</legend>
+                <label class="comparison-toggle">
+                  <input type="radio" name="visual-verification-browser" value="ego" checked={browserKind === "ego"} onChange={() => onBrowserKind("ego")} />
+                  ego lite · 현재 로그인 상태를 그대로 사용
+                </label>
+                {browserKinds.includes("playwright") ? (
+                  <label class="comparison-toggle">
+                    <input type="radio" name="visual-verification-browser" value="playwright" checked={browserKind === "playwright"} onChange={() => onBrowserKind("playwright")} />
+                    별도 검증 브라우저 · 전용 Chrome 프로필
+                  </label>
+                ) : null}
+              </fieldset>
+            ) : null}
+            {browserKind === "ego" ? (
+              <p class="input-note">ego lite의 격리된 작업 공간에서 현재 프로필의 로그인 상태로 검증합니다. 별도 로그인이 필요 없습니다.</p>
+            ) : (
+              <>
+                <button type="button" disabled={browserBusy} aria-busy={browserBusy} onClick={onOpenBrowser}>{browserBusy ? "검증 브라우저 여는 중…" : "검증 브라우저 열기"}</button>
+                <p class="input-note">별도 검증 브라우저에서 한 번 로그인하세요. 현재 탭은 그대로 유지되며, 비교 요청은 순서대로 처리됩니다.</p>
+              </>
+            )}
             {browserMessage ? <p class="input-note" role="status">{browserMessage}</p> : null}
             {browserError ? <p class="error-banner" role="alert">{browserError}</p> : null}
             {comparisonError ? <p class="error-banner" role="alert">{comparisonError}</p> : null}
@@ -413,9 +535,12 @@ function RequestStrip({
 function TaskStrip({
   panelRef,
   position,
+  docked = false,
   task,
   followUpOpen,
   followUpText,
+  commitOpen,
+  commitText,
   composingRef,
   busyAction,
   onCancel,
@@ -425,14 +550,20 @@ function TaskStrip({
   onToggleFollowUp,
   onFollowUpText,
   onFollowUp,
+  onToggleCommit,
+  onCommitText,
+  onCommit,
   onNewRequest,
   onDismiss,
 }: {
-  panelRef: preact.RefObject<HTMLDivElement>;
-  position: PopoverPosition;
+  panelRef?: preact.RefObject<HTMLDivElement>;
+  position?: PopoverPosition;
+  docked?: boolean;
   task: TaskView;
   followUpOpen: boolean;
   followUpText: string;
+  commitOpen: boolean;
+  commitText: string;
   composingRef: preact.RefObject<boolean>;
   busyAction: boolean;
   onCancel: () => void;
@@ -442,6 +573,9 @@ function TaskStrip({
   onToggleFollowUp: () => void;
   onFollowUpText: (value: string) => void;
   onFollowUp: () => void;
+  onToggleCommit: () => void;
+  onCommitText: (value: string) => void;
+  onCommit: () => void;
   onNewRequest: () => void;
   onDismiss: () => void;
 }) {
@@ -458,6 +592,10 @@ function TaskStrip({
     task.status === "accepted" ||
     task.status === "reverted" ||
     ((task.status === "failed" || task.status === "canceled") && !hasChanges);
+  const committable =
+    !task.commit
+    && hasChanges
+    && (task.status === "review" || task.status === "accepted");
   const errorOutcome =
     ERROR_PHASES.has(task.status) || task.verification === "failed";
   const progressOutcome = errorOutcome
@@ -492,9 +630,11 @@ function TaskStrip({
   return (
     <section
       id="visual-task-strip"
-      ref={panelRef}
-      class="strip"
-      style={{ left: `${position.left}px`, top: `${position.top}px` }}
+      {...(panelRef ? { ref: panelRef } : {})}
+      class={docked ? "strip strip-docked" : "strip"}
+      {...(docked || !position
+        ? {}
+        : { style: { left: `${position.left}px`, top: `${position.top}px` } })}
       aria-label="작업 진행과 검토"
     >
       <header class="strip-head">
@@ -604,6 +744,13 @@ function TaskStrip({
                 <strong>검증</strong>
                 <span>{verificationLabel(task.verification)}</span>
               </div>
+              {task.commit ? (
+                <div class="commit-note" role="status">
+                  <strong>커밋됨</strong>
+                  <span class="machine">{task.commit.sha.slice(0, 7)}</span>
+                  <span>{compactText(task.commit.message.split("\n")[0] ?? "", 80)}</span>
+                </div>
+              ) : null}
             </div>
             <details class="diff">
               <summary>Unified diff 보기</summary>
@@ -653,6 +800,17 @@ function TaskStrip({
               </button>
             </>
           ) : null}
+          {committable ? (
+            <button
+              type="button"
+              class="secondary"
+              aria-expanded={commitOpen ? "true" : "false"}
+              disabled={!task.id || busyAction}
+              onClick={onToggleCommit}
+            >
+              커밋
+            </button>
+          ) : null}
           {canStartNew ? (
             <button type="button" class="secondary" onClick={onNewRequest}>
               새 요청
@@ -700,19 +858,212 @@ function TaskStrip({
             </button>
           </div>
         ) : null}
+
+        {commitOpen && committable ? (
+          <div class="follow-up commit-form">
+            <label class="field-label" for="visual-commit-message">
+              커밋 메시지
+            </label>
+            <textarea
+              id="visual-commit-message"
+              class="request-field"
+              value={commitText}
+              maxLength={4_000}
+              placeholder="첫 줄이 제목이 됩니다."
+              onInput={(event) => onCommitText(event.currentTarget.value)}
+              onCompositionStart={() => {
+                composingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                composingRef.current = false;
+              }}
+            />
+            <p class="input-note">
+              이 작업이 바꾼 파일 {task.changedFiles.length}개만 스테이징해서 로컬 Git 사용자 이름으로
+              커밋합니다. 푸시는 하지 않습니다.
+            </p>
+            <button
+              type="button"
+              class="primary"
+              disabled={!task.id || !commitText.trim() || busyAction}
+              onClick={onCommit}
+            >
+              커밋하기
+            </button>
+          </div>
+        ) : null}
       </div>
     </section>
   );
 }
 
+const COMPACT_POSITION_KEY = "visual-remote:compact-strip-position";
+const DRAG_THRESHOLD_PX = 5;
+const DRAG_MARGIN_PX = 8;
+
+function readStoredPosition(key: string): DragPosition | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<DragPosition> | null;
+    if (typeof value?.left === "number" && typeof value.top === "number") {
+      return { left: value.left, top: value.top };
+    }
+  } catch {
+    /* storage may be unavailable in the host page */
+  }
+  return null;
+}
+
+function writeStoredPosition(key: string, position: DragPosition | null): void {
+  try {
+    if (position) localStorage.setItem(key, JSON.stringify(position));
+    else localStorage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}
+
+interface DragHandlers {
+  onPointerDown: (event: JSX.TargetedPointerEvent<HTMLElement>) => void;
+  onPointerMove: (event: JSX.TargetedPointerEvent<HTMLElement>) => void;
+  onPointerUp: (event: JSX.TargetedPointerEvent<HTMLElement>) => void;
+  onPointerCancel: (event: JSX.TargetedPointerEvent<HTMLElement>) => void;
+  onClickCapture: (event: JSX.TargetedMouseEvent<HTMLElement>) => void;
+}
+
+interface Draggable {
+  elementRef: preact.RefObject<HTMLElement>;
+  position: DragPosition | null;
+  dragging: boolean;
+  handlers: DragHandlers;
+}
+
+/**
+ * Pointer-driven dragging for a fixed surface. Plain clicks on children keep
+ * working: pointer capture only starts after the pointer travels past the
+ * threshold, and the click that ends a drag is swallowed.
+ */
+function useDraggable(storageKey?: string): Draggable {
+  const [position, setPosition] = useState<DragPosition | null>(() =>
+    storageKey ? readStoredPosition(storageKey) : null,
+  );
+  const [dragging, setDragging] = useState(false);
+  const elementRef = useRef<HTMLElement>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originLeft: number;
+    originTop: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
+
+  const clampToViewport = useCallback((candidate: DragPosition): DragPosition => {
+    const element = elementRef.current;
+    return clampDragPosition(
+      candidate,
+      { width: element?.offsetWidth ?? 0, height: element?.offsetHeight ?? 0 },
+      { width: innerWidth, height: innerHeight },
+      DRAG_MARGIN_PX,
+    );
+  }, []);
+
+  const positioned = position !== null;
+  useEffect(() => {
+    if (!positioned) return;
+    const keepInside = () =>
+      setPosition((current) => (current ? clampToViewport(current) : current));
+    keepInside();
+    window.addEventListener("resize", keepInside);
+    return () => window.removeEventListener("resize", keepInside);
+  }, [positioned, clampToViewport]);
+
+  const finish = useCallback(
+    (event: JSX.TargetedPointerEvent<HTMLElement>) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      dragRef.current = null;
+      if (!drag.moved) return;
+      try {
+        elementRef.current?.releasePointerCapture(event.pointerId);
+      } catch {
+        /* capture may already be gone */
+      }
+      suppressClickRef.current = true;
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+      setDragging(false);
+      if (storageKey) {
+        setPosition((current) => {
+          writeStoredPosition(storageKey, current);
+          return current;
+        });
+      }
+    },
+    [storageKey],
+  );
+
+  const handlers = useMemo<DragHandlers>(
+    () => ({
+      onPointerDown: (event) => {
+        if (event.button !== 0 || !event.isPrimary) return;
+        const element = elementRef.current;
+        if (!element) return;
+        const rect = element.getBoundingClientRect();
+        dragRef.current = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          originLeft: rect.left,
+          originTop: rect.top,
+          moved: false,
+        };
+      },
+      onPointerMove: (event) => {
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        const dx = event.clientX - drag.startX;
+        const dy = event.clientY - drag.startY;
+        if (!drag.moved) {
+          if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+          drag.moved = true;
+          setDragging(true);
+          try {
+            elementRef.current?.setPointerCapture(event.pointerId);
+          } catch {
+            /* capture is best-effort */
+          }
+        }
+        event.preventDefault();
+        setPosition(clampToViewport({ left: drag.originLeft + dx, top: drag.originTop + dy }));
+      },
+      onPointerUp: finish,
+      onPointerCancel: finish,
+      onClickCapture: (event) => {
+        if (!suppressClickRef.current) return;
+        event.preventDefault();
+        event.stopPropagation();
+      },
+    }),
+    [clampToViewport, finish],
+  );
+
+  return { elementRef, position, dragging, handlers };
+}
+
 function TaskCompactStrip({
   task,
   busyAction,
+  drag,
   onExpand,
   onCancel,
 }: {
   task: TaskView;
   busyAction: boolean;
+  drag: Draggable;
   onExpand: () => void;
   onCancel: () => void;
 }) {
@@ -724,11 +1075,23 @@ function TaskCompactStrip({
   const actionId = "visual-task-compact-action";
   return (
     <section
+      ref={drag.elementRef as preact.RefObject<HTMLElement>}
       class="task-compact"
       data-active={active ? "true" : "false"}
       data-error={error ? "true" : "false"}
+      data-dragging={drag.dragging ? "true" : "false"}
+      {...(drag.position
+        ? { style: { left: `${drag.position.left}px`, top: `${drag.position.top}px`, right: "auto" } }
+        : {})}
       aria-label="최소화된 작업 상태"
+      title="드래그해서 위치를 옮길 수 있습니다"
+      {...drag.handlers}
     >
+      <span class="task-compact-grip" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </span>
       <button
         type="button"
         class="task-compact-main"
@@ -766,6 +1129,85 @@ function TaskCompactStrip({
   );
 }
 
+function TaskDock({
+  task,
+  tasks,
+  tasksError,
+  onSelectTask,
+  onRefresh,
+  onClose,
+  children,
+}: {
+  task: TaskView | null;
+  tasks: TaskRecord[];
+  tasksError: string | null;
+  onSelectTask: (record: TaskRecord) => void;
+  onRefresh: () => void;
+  onClose: () => void;
+  children?: preact.ComponentChildren;
+}) {
+  return (
+    <aside id="visual-task-dock" class="task-dock" aria-label="작업 패널">
+      <header class="dock-head">
+        <span class="strip-title">작업 패널</span>
+        <span class="strip-code machine">{tasks.length} TASKS</span>
+        <button
+          type="button"
+          class="dock-close"
+          title={task ? "작업 상태를 남기고 패널 접기" : "작업 패널 닫기"}
+          onClick={onClose}
+        >
+          {task ? "접기" : "닫기"}
+        </button>
+      </header>
+      <div class="dock-body">
+        {children}
+        {!task ? (
+          <p class="dock-empty">
+            진행 중인 작업이 없습니다. 페이지에서 요소를 선택해 변경을 요청하거나
+            아래 목록에서 작업을 선택하세요.
+          </p>
+        ) : null}
+        <div class="dock-section-head">
+          <span>전체 작업</span>
+          <button type="button" class="dock-refresh" onClick={onRefresh}>
+            새로고침
+          </button>
+        </div>
+        {tasksError ? (
+          <div class="error-banner dock-error" role="status">{tasksError}</div>
+        ) : null}
+        {tasks.length === 0 ? (
+          <p class="dock-empty">아직 작업 기록이 없습니다.</p>
+        ) : (
+          <ol class="dock-list" aria-label="전체 작업 목록">
+            {tasks.map((record) => (
+              <li key={record.id}>
+                <button
+                  type="button"
+                  class="dock-row"
+                  data-tone={taskTone(record)}
+                  aria-current={record.id === task?.id ? "true" : undefined}
+                  onClick={() => onSelectTask(record)}
+                >
+                  <span class="dock-state" aria-hidden="true" />
+                  <span class="dock-copy">
+                    <strong>{compactText(record.requestText, 90)}</strong>
+                    <span>
+                      {PHASE_LABELS[record.status]} · {record.changedFiles.length} files
+                    </span>
+                  </span>
+                  <span class="dock-meta machine">{taskTimeLabel(record)}</span>
+                </button>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+    </aside>
+  );
+}
+
 function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBootstrap }) {
   const { authMode } = bootstrap;
   const pairedFromFragment = useMemo(
@@ -797,15 +1239,24 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
   const [requestText, setRequestText] = useState("");
   const [scope, setScope] = useState<RequestScope>("instance");
   const [comparisonChoice, setComparisonChoice] = useState<boolean | undefined>(undefined);
+  const [verificationInfo, setVerificationInfo] = useState<VerificationBrowserInfo | null>(null);
+  const [browserChoice, setBrowserChoice] = useState<VerificationBrowserKind | undefined>(undefined);
   const [comparisonUrl, setComparisonUrl] = useState("");
+  const [comparisonTarget, setComparisonTarget] = useState(99);
+  const [comparisonRounds, setComparisonRounds] = useState(4);
   const [browserMessage, setBrowserMessage] = useState("");
   const [browserError, setBrowserError] = useState("");
   const [browserBusy, setBrowserBusy] = useState(false);
   const detectedComparisonUrl = requestText.match(/https:\/\/(?:www\.)?figma\.com\/(?:design|file)\/[^\s<>"']+/i)?.[0]?.replace(/[),.;]+$/, "") ?? "";
   const comparisonEnabled = comparisonChoice ?? Boolean(detectedComparisonUrl);
+  const browserKinds = verificationInfo?.browsers ?? [];
+  const browserKind: VerificationBrowserKind | undefined =
+    browserChoice && browserKinds.includes(browserChoice) ? browserChoice : verificationInfo?.defaultBrowser;
   let comparisonRequest: ComparisonRequest | undefined;
   let comparisonError = "";
-  try { comparisonRequest = normalizeComparisonRequest(requestText, comparisonChoice === false ? { enabled: false } : comparisonEnabled ? { enabled: true, url: comparisonUrl || detectedComparisonUrl } : undefined); }
+  const targetMatch = Number.isFinite(comparisonTarget) ? Math.min(100, Math.max(50, comparisonTarget)) : 99;
+  const maxIterations = Number.isFinite(comparisonRounds) ? Math.min(20, Math.max(1, Math.round(comparisonRounds))) : 4;
+  try { comparisonRequest = normalizeComparisonRequest(requestText, comparisonChoice === false ? { enabled: false } : comparisonEnabled ? { enabled: true, url: comparisonUrl || detectedComparisonUrl, targetMatch, maxIterations, ...(browserKind ? { browser: browserKind } : {}) } : undefined); }
   catch (error) { comparisonError = error instanceof Error ? error.message : "Figma 프레임 링크를 확인하세요."; }
 
   const openBrowser = async () => {
@@ -847,8 +1298,15 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
   const [viewerUrlFailed, setViewerUrlFailed] = useState(false);
   const [task, setTask] = useState<TaskView | null>(null);
   const [taskPanelHidden, setTaskPanelHidden] = useState(false);
+  const [tasks, setTasks] = useState<TaskRecord[]>([]);
+  const [tasksError, setTasksError] = useState<string | null>(null);
+  const [listOpen, setListOpen] = useState(false);
+  const dockVisible = task ? !taskPanelHidden : listOpen;
+  const compactDrag = useDraggable(COMPACT_POSITION_KEY);
   const [followUpOpen, setFollowUpOpen] = useState(false);
   const [followUpText, setFollowUpText] = useState("");
+  const [commitOpen, setCommitOpen] = useState(false);
+  const [commitText, setCommitText] = useState("");
   const [pendingAction, setPendingAction] = useState<{ taskId: string } | null>(null);
   const busyAction = pendingAction !== null && pendingAction.taskId === task?.id;
   const [popoverPosition, setPopoverPosition] = useState<PopoverPosition>({
@@ -906,6 +1364,33 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
     [token],
   );
 
+  const refreshTasks = useCallback(async () => {
+    try {
+      const records = await fetchTasks(token, { limit: 40 });
+      if (!mountedRef.current) return;
+      setTasks(orderTasks(records));
+      setTasksError(null);
+    } catch (error) {
+      if (!mountedRef.current) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setTasksError(`작업 목록을 불러오지 못했습니다 (${compactText(message, 120)})`);
+    }
+  }, [token]);
+
+  const selectTaskFromList = useCallback(
+    (record: TaskRecord) => {
+      activeTaskIdRef.current = record.id;
+      setFollowUpOpen(false);
+      setFollowUpText("");
+      setCommitOpen(false);
+      setTaskPanelHidden(false);
+      setListOpen(false);
+      setTask(viewFromRecord(record));
+      void loadArtifacts(record.id);
+    },
+    [loadArtifacts],
+  );
+
   const handleServerEvent = useCallback(
     (event: ServerEvent) => {
       const record = taskFromEvent(event);
@@ -913,6 +1398,10 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
       const phase = phaseFromEvent(event);
       const log = logFromEvent(event);
       const files = changedFilesFromEvent(event);
+
+      if (isTaskRecord(record)) {
+        setTasks((current) => upsertTask(current, record));
+      }
 
       if (event.type === "project.state") {
         const payload = event.payload as { projectId?: unknown };
@@ -1005,6 +1494,7 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
             ...(typeof error === "string" ? { error } : {}),
             ...(record?.error?.code ? { errorCode: record.error.code } : {}),
             ...(record?.permissionDeniedTools ? { permissionDeniedTools: record.permissionDeniedTools } : {}),
+            ...(record?.commit ? { commit: record.commit } : {}),
           };
         });
       }
@@ -1075,11 +1565,17 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
     });
     connectionRef.current = bridge;
     bridge.connect();
+    void refreshTasks();
     void fetchProjectId(token)
       .then((id) => {
         if (active && id) {
           setProjectId(id);
         }
+      })
+      .catch(() => undefined);
+    void fetchVerificationInfo(token)
+      .then((info) => {
+        if (active && info) setVerificationInfo(info);
       })
       .catch(() => undefined);
     void fetchLatestTaskForSession(token, browserSessionId, hydrationController.signal)
@@ -1092,23 +1588,7 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
             return current;
           }
           activeTaskIdRef.current = latestTask.id;
-          return {
-            id: latestTask.id,
-            status: latestTask.status,
-            requestText: latestTask.requestText,
-            changedFiles: latestTask.changedFiles,
-            logs: [],
-            diff: "",
-            ...(latestTask.comparison ? { comparison: latestTask.comparison } : {}),
-            ...(latestTask.error?.code ? { errorCode: latestTask.error.code } : {}),
-            ...(latestTask.permissionDeniedTools ? { permissionDeniedTools: latestTask.permissionDeniedTools } : {}),
-            ...(latestTask.verificationStatus
-              ? { verification: latestTask.verificationStatus }
-              : {}),
-            ...(latestTask.error?.message
-              ? { error: latestTask.error.message }
-              : {}),
-          };
+          return viewFromRecord(latestTask);
         });
         void loadArtifacts(latestTask.id);
       })
@@ -1126,7 +1606,11 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
       bridge.close();
       connectionRef.current = null;
     };
-  }, [authMode, browserSessionId, handleServerEvent, loadArtifacts, pageState, token]);
+  }, [authMode, browserSessionId, handleServerEvent, loadArtifacts, pageState, refreshTasks, token]);
+
+  useEffect(() => {
+    if (dockVisible) void refreshTasks();
+  }, [dockVisible, refreshTasks]);
 
   useEffect(() => {
     if (authMode === "local") return;
@@ -1560,7 +2044,7 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
   }, []);
 
   useEffect(() => {
-    if (!requestOpen && !task) {
+    if (!requestOpen) {
       return;
     }
     const panel = panelRef.current;
@@ -1579,7 +2063,7 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [requestOpen, task?.id]);
+  }, [requestOpen]);
 
   const anchor = useMemo<Rect>(() => {
     if (region) {
@@ -1593,7 +2077,7 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
   }, [geometryRevision, region, selected]);
 
   useLayoutEffect(() => {
-    if (!requestOpen && !task) {
+    if (!requestOpen) {
       return;
     }
     const panel = panelRef.current;
@@ -1615,15 +2099,7 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
         toolbarBottom + 10,
       ),
     );
-  }, [
-    anchor,
-    followUpOpen,
-    requestOpen,
-    task?.changedFiles.length,
-    task?.diff,
-    task?.logs.length,
-    task?.status,
-  ]);
+  }, [anchor, requestOpen]);
 
   const submitRequest = useCallback(async () => {
     const trimmed = requestText.trim();
@@ -1697,6 +2173,62 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
     requestText,
     scope,
   ]);
+
+  const toggleCommitForm = useCallback(() => {
+    setCommitOpen((open) => {
+      if (!open) {
+        setFollowUpOpen(false);
+        setCommitText((text) => (text.trim() ? text : task ? suggestedCommitMessage(task) : ""));
+      }
+      return !open;
+    });
+  }, [task]);
+
+  const submitCommit = useCallback(async () => {
+    if (!task?.id || pendingActionRef.current?.taskId === task.id) return;
+    const message = commitText.trim();
+    if (!message) return;
+    const request = { taskId: task.id };
+    pendingActionRef.current = request;
+    setPendingAction(request);
+    try {
+      const committed = await commitTask(token, request.taskId, message);
+      if (pendingActionRef.current !== request) return;
+      setCommitOpen(false);
+      setCommitText("");
+      setTask((current) =>
+        current?.id === request.taskId
+          ? {
+              ...current,
+              status: committed.status,
+              ...(committed.commit ? { commit: committed.commit } : {}),
+              logs: [
+                ...current.logs,
+                committed.commit
+                  ? `변경을 커밋했습니다 (${committed.commit.sha.slice(0, 7)}).`
+                  : "커밋 요청을 보냈습니다.",
+              ],
+            }
+          : current,
+      );
+      setTasks((current) => upsertTask(current, committed));
+    } catch (error) {
+      if (pendingActionRef.current !== request) return;
+      setTask((current) =>
+        current?.id === request.taskId
+          ? {
+              ...current,
+              error: error instanceof Error ? error.message : "커밋을 완료하지 못했습니다.",
+            }
+          : current,
+      );
+    } finally {
+      if (pendingActionRef.current === request) {
+        pendingActionRef.current = null;
+        setPendingAction(null);
+      }
+    }
+  }, [commitText, task, token]);
 
   const runTaskAction = useCallback(
     async (action: "accept" | "revert" | "cancel") => {
@@ -1937,11 +2469,23 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
             요청 작성
           </button>
         ) : null}
+        {!task && !requestOpen ? (
+          <button
+            type="button"
+            class="task-toggle"
+            aria-controls="visual-task-dock"
+            aria-expanded={listOpen ? "true" : "false"}
+            title={listOpen ? "작업 패널 닫기" : "전체 작업 목록 열기"}
+            onClick={() => setListOpen((value) => !value)}
+          >
+            {listOpen ? "작업 닫기" : "작업 목록"}
+          </button>
+        ) : null}
         {task && !requestOpen ? (
           <button
             type="button"
             class="task-toggle"
-            aria-controls="visual-task-strip"
+            aria-controls="visual-task-dock"
             aria-expanded={taskPanelHidden ? "false" : "true"}
             title={
               taskPanelHidden
@@ -1996,6 +2540,7 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
         <TaskCompactStrip
           task={task}
           busyAction={busyAction}
+          drag={compactDrag}
           onExpand={() => setTaskPanelHidden(false)}
           onCancel={() => void runTaskAction("cancel")}
         />
@@ -2048,9 +2593,16 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
           browserMessage={browserMessage}
           browserError={browserError}
           browserBusy={browserBusy}
+          browserKinds={browserKinds}
+          browserKind={browserKind}
+          comparisonTarget={comparisonTarget}
+          comparisonRounds={comparisonRounds}
+          onComparisonTarget={setComparisonTarget}
+          onComparisonRounds={setComparisonRounds}
           onComparisonEnabled={setComparisonChoice}
           onComparisonUrl={setComparisonUrl}
           onOpenBrowser={() => void openBrowser()}
+          onBrowserKind={setBrowserChoice}
           composingRef={compositionRef}
           onRequestText={setRequestText}
           onScope={setScope}
@@ -2058,22 +2610,45 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
         />
       ) : null}
 
-      {task && !taskPanelHidden ? (
+      {dockVisible ? (
+        <TaskDock
+          task={task}
+          tasks={tasks}
+          tasksError={tasksError}
+          onSelectTask={selectTaskFromList}
+          onRefresh={() => void refreshTasks()}
+          onClose={() => {
+            if (task) {
+              resetSelection();
+              setTaskPanelHidden(true);
+              return;
+            }
+            setListOpen(false);
+          }}
+        >
+          {task ? (
         <TaskStrip
-          panelRef={panelRef}
-          position={popoverPosition}
+          docked
           task={task}
           followUpOpen={followUpOpen}
           followUpText={followUpText}
+          commitOpen={commitOpen}
+          commitText={commitText}
           composingRef={compositionRef}
           busyAction={busyAction}
           onCancel={() => void runTaskAction("cancel")}
           onAccept={() => void runTaskAction("accept")}
           onRevert={() => void runTaskAction("revert")}
           onApproveTools={() => void approveToolsAndRetry()}
-          onToggleFollowUp={() => setFollowUpOpen((value) => !value)}
+          onToggleFollowUp={() => {
+            setCommitOpen(false);
+            setFollowUpOpen((value) => !value);
+          }}
           onFollowUpText={setFollowUpText}
           onFollowUp={() => void submitFollowUp()}
+          onToggleCommit={toggleCommitForm}
+          onCommitText={setCommitText}
+          onCommit={() => void submitCommit()}
           onNewRequest={() => {
             setTask(null);
             setTaskPanelHidden(false);
@@ -2086,6 +2661,8 @@ function Overlay({ host, bootstrap }: { host: HTMLElement; bootstrap: BridgeBoot
             resetSelection();
           }}
         />
+          ) : null}
+        </TaskDock>
       ) : null}
 
       {!requestOpen

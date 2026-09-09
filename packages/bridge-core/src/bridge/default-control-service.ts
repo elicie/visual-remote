@@ -16,6 +16,8 @@ import type { BridgeControlContext } from "./control-context.js";
 import type { ControlService } from "./control-service.js";
 import { createTaskControlService } from "./task-control-service.js";
 import { ComparisonBrowser } from "../comparison/browser.js";
+import { EgoComparisonBrowser, findEgoBrowserExecutable } from "../comparison/ego-browser.js";
+import { VerificationBrowserRouter, type VerificationBrowserDriver } from "../comparison/router.js";
 
 function createAgentAdapter(agent: VisualDevConfig["agent"]): AgentAdapter {
   if (agent.adapter === "claude") {
@@ -27,6 +29,9 @@ function createAgentAdapter(agent: VisualDevConfig["agent"]): AgentAdapter {
       ...(agent.reasoningEffort === undefined
         ? {}
         : { reasoningEffort: agent.reasoningEffort }),
+      ...(agent.permissionMode === undefined
+        ? {}
+        : { permissionMode: agent.permissionMode }),
     });
   }
   if (agent.adapter === "codex") {
@@ -56,6 +61,39 @@ function inheritedAgentEnvironment(
   );
 }
 
+/**
+ * Builds the verification browser set: the Playwright profile is always
+ * offered, ego lite whenever its CLI is present, and the configured preference
+ * decides which one is used when a request does not choose explicitly.
+ */
+export async function createVerificationBrowserRouter(
+  preference: VisualDevConfig["verification"]["browser"],
+  options: { profileDirectory: string; upstreamUrl: string; taskSpaceName: string },
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<VerificationBrowserRouter> {
+  const drivers: Partial<Record<"playwright" | "ego", VerificationBrowserDriver>> = {
+    playwright: new ComparisonBrowser({
+      profileDirectory: options.profileDirectory,
+      upstreamUrl: options.upstreamUrl,
+    }),
+  };
+  const egoExecutable = await findEgoBrowserExecutable(environment);
+  if (egoExecutable) {
+    drivers.ego = new EgoComparisonBrowser({
+      upstreamUrl: options.upstreamUrl,
+      executable: egoExecutable,
+      environment,
+      taskSpaceName: options.taskSpaceName,
+    });
+  } else if (preference === "ego") {
+    throw new Error(
+      "verification.browser is set to ego but the ego-browser command was not found. Install ego lite and finish onboarding, or set verification.browser to auto or playwright.",
+    );
+  }
+  const defaultKind = preference === "auto" ? (egoExecutable ? "ego" : "playwright") : preference;
+  return new VerificationBrowserRouter(drivers, defaultKind);
+}
+
 export async function createDefaultControlService(
   context: BridgeControlContext,
   environment: NodeJS.ProcessEnv = process.env,
@@ -77,10 +115,16 @@ export async function createDefaultControlService(
   });
   const storagePaths = await resolveStoragePaths(context.repoRoot, environment);
   const store = new SqliteTaskStore(storagePaths.databasePath);
-  const comparisonBrowser = new ComparisonBrowser({
-    profileDirectory: resolve(storagePaths.logsDirectory, "..", "comparison-browser"),
-    upstreamUrl: context.upstreamUrl,
-  });
+  const egoExecutable = await findEgoBrowserExecutable(environment);
+  const comparisonBrowser = await createVerificationBrowserRouter(
+    loaded.config.verification.browser,
+    {
+      profileDirectory: resolve(storagePaths.logsDirectory, "..", "comparison-browser"),
+      upstreamUrl: context.upstreamUrl,
+      taskSpaceName: `Visual Remote · ${context.projectId}`,
+    },
+    environment,
+  );
   const taskService = new TaskService({
     projectId: context.projectId,
     workspaceRoot: context.workspaceRoot,
@@ -90,6 +134,7 @@ export async function createDefaultControlService(
     git,
     comparisonRoot: resolve(storagePaths.logsDirectory, "..", "comparisons"),
     comparisonBrowser,
+    ...(egoExecutable ? { egoBrowserExecutable: egoExecutable } : {}),
     maxRunMs: loaded.config.agent.maxRunMs,
     maxPending: loaded.config.queue.maxPending,
     resumeMode: loaded.config.agent.resumeMode,
@@ -110,6 +155,7 @@ export async function createDefaultControlService(
       workspaceRoot: context.workspaceRoot,
       mode: context.mode,
       upstreamUrl: context.upstreamUrl,
+      verification: comparisonBrowser.info(),
     },
   });
   const reportRuntimeState = (): void => {

@@ -2,12 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   calculatePopoverPosition,
+  clampDragPosition,
   compactText,
   intersectionRatio,
   normalizeRect,
+  orderTasks,
   parsePairingFragment,
   parseViewerFragment,
   shouldSubmitOnEnter,
+  upsertTask,
 } from "@visual-remote/overlay/helpers";
 import {
   BridgeConnection,
@@ -403,6 +406,48 @@ describe("bridge event sequencing", () => {
     expect(received.map((item) => item.seq)).toEqual([6, 8]);
     expect(values.get("visual-bridge:viewer-last-sequence")).toBe("8");
     connection.close();
+  });
+});
+
+describe("draggable surfaces", () => {
+  const size = { width: 360, height: 48 };
+  const viewport = { width: 1280, height: 800 };
+
+  it("keeps a dragged strip inside the viewport margin", () => {
+    expect(clampDragPosition({ left: -40, top: -10 }, size, viewport, 8)).toEqual({ left: 8, top: 8 });
+    expect(clampDragPosition({ left: 2000, top: 2000 }, size, viewport, 8)).toEqual({
+      left: 1280 - 360 - 8,
+      top: 800 - 48 - 8,
+    });
+    expect(clampDragPosition({ left: 100.4, top: 200.6 }, size, viewport, 8)).toEqual({ left: 100, top: 201 });
+  });
+
+  it("pins to the margin when the surface is wider than the viewport", () => {
+    expect(clampDragPosition({ left: 50, top: 50 }, size, { width: 300, height: 40 }, 8)).toEqual({
+      left: 8,
+      top: 8,
+    });
+  });
+});
+
+describe("task list ordering", () => {
+  const older = { id: "task-a", createdAt: "2026-07-31T00:00:00.000Z", status: "accepted" };
+  const newer = { id: "task-b", createdAt: "2026-07-31T00:05:00.000Z", status: "queued" };
+  const tie = { id: "task-c", createdAt: "2026-07-31T00:05:00.000Z", status: "queued" };
+
+  it("orders newest first and breaks timestamp ties by id", () => {
+    expect(orderTasks([older, newer, tie]).map((task) => task.id)).toEqual([
+      "task-c", "task-b", "task-a",
+    ]);
+  });
+
+  it("upserts live task records without duplicating or reordering unrelated rows", () => {
+    const inserted = upsertTask([older], newer);
+    expect(inserted.map((task) => task.id)).toEqual(["task-b", "task-a"]);
+    const updated = upsertTask(inserted, { ...newer, status: "review" });
+    expect(updated).toHaveLength(2);
+    expect(updated[0]).toEqual({ ...newer, status: "review" });
+    expect(upsertTask([], older)).toEqual([older]);
   });
 });
 

@@ -63,6 +63,12 @@ function rowToTask(row: Row): StoredTask {
   const diffText = optional(row.diff_text as string | null);
   const startedAt = optional(row.started_at as string | null);
   const completedAt = optional(row.completed_at as string | null);
+  const commitSha = optional(row.commit_sha as string | null);
+  const commitMessage = optional(row.commit_message as string | null);
+  const committedAt = optional(row.committed_at as string | null);
+  if (commitSha && commitMessage !== undefined && committedAt) {
+    record.commit = { sha: commitSha, message: commitMessage, committedAt };
+  }
 
   if (parentTaskId) record.parentTaskId = parentTaskId;
   if (agentSessionId) record.agentSessionId = agentSessionId;
@@ -122,6 +128,9 @@ function taskParams(task: StoredTask): Record<string, SqlValue> {
     created_at: task.createdAt,
     started_at: task.startedAt ?? null,
     completed_at: task.completedAt ?? null,
+    commit_sha: task.commit?.sha ?? null,
+    commit_message: task.commit?.message ?? null,
+    committed_at: task.commit?.committedAt ?? null,
   };
 }
 
@@ -150,6 +159,9 @@ export class SqliteTaskStore implements TaskStore {
         pre_head TEXT,
         pre_index_tree TEXT,
         pre_restricted_fingerprint TEXT,
+        commit_sha TEXT,
+        commit_message TEXT,
+        committed_at TEXT,
         before_ref TEXT,
         after_ref TEXT,
         changed_files_json TEXT NOT NULL DEFAULT '[]',
@@ -188,7 +200,7 @@ export class SqliteTaskStore implements TaskStore {
     if (!taskColumns.some((column) => String(column.name) === "comparison_json")) {
       this.#db.exec("ALTER TABLE tasks ADD COLUMN comparison_json TEXT");
     }
-    for (const column of ["permission_denied_tools_json", "approved_tools_json"]) {
+    for (const column of ["permission_denied_tools_json", "approved_tools_json", "commit_sha", "commit_message", "committed_at"]) {
       if (!taskColumns.some((entry) => String(entry.name) === column)) {
         this.#db.exec(`ALTER TABLE tasks ADD COLUMN ${column} TEXT`);
       }
@@ -214,14 +226,14 @@ export class SqliteTaskStore implements TaskStore {
           pre_restricted_fingerprint, before_ref, after_ref, changed_files_json,
           verification_status, error_code, error_message, context_json, diff_text,
           comparison_json, permission_denied_tools_json, approved_tools_json,
-          created_at, started_at, completed_at
+          created_at, started_at, completed_at, commit_sha, commit_message, committed_at
         ) VALUES (
           $id, $project_id, $status, $request_text, $scope, $origin_browser_session_id,
           $parent_task_id, $agent_adapter, $agent_session_id, $pre_head, $pre_index_tree,
           $pre_restricted_fingerprint, $before_ref, $after_ref, $changed_files_json,
           $verification_status, $error_code, $error_message, $context_json, $diff_text,
           $comparison_json, $permission_denied_tools_json, $approved_tools_json,
-          $created_at, $started_at, $completed_at
+          $created_at, $started_at, $completed_at, $commit_sha, $commit_message, $committed_at
         )
       `)
       .run(params);
@@ -259,7 +271,10 @@ export class SqliteTaskStore implements TaskStore {
           diff_text = $diff_text,
           created_at = $created_at,
           started_at = $started_at,
-          completed_at = $completed_at
+          completed_at = $completed_at,
+          commit_sha = $commit_sha,
+          commit_message = $commit_message,
+          committed_at = $committed_at
         WHERE id = $id
       `)
       .run(params);

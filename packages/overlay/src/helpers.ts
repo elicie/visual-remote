@@ -159,3 +159,44 @@ export function compactText(value: string, maximumLength: number): string {
 
   return `${compacted.slice(0, Math.max(0, maximumLength - 1)).trimEnd()}…`;
 }
+
+export interface TaskOrderKey {
+  id: string;
+  createdAt: string;
+}
+
+/** Newest first, with the id as a stable tie-breaker for equal timestamps. */
+export function orderTasks<T extends TaskOrderKey>(tasks: readonly T[]): T[] {
+  return [...tasks].sort(
+    (left, right) =>
+      right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+  );
+}
+
+export function upsertTask<T extends TaskOrderKey>(tasks: readonly T[], nextTask: T): T[] {
+  const existing = tasks.findIndex((task) => task.id === nextTask.id);
+  if (existing < 0) return orderTasks([nextTask, ...tasks]);
+  const next = [...tasks];
+  next[existing] = nextTask;
+  return orderTasks(next);
+}
+
+export interface DragPosition {
+  left: number;
+  top: number;
+}
+
+/** Keeps a dragged fixed-position surface fully inside the viewport with a margin. */
+export function clampDragPosition(
+  position: DragPosition,
+  size: Size,
+  viewport: Size,
+  margin: number,
+): DragPosition {
+  const maxLeft = Math.max(margin, viewport.width - size.width - margin);
+  const maxTop = Math.max(margin, viewport.height - size.height - margin);
+  return {
+    left: clamp(Math.round(position.left), margin, maxLeft),
+    top: clamp(Math.round(position.top), margin, maxTop),
+  };
+}

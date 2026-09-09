@@ -8,6 +8,7 @@ import {
   discoverVisualDevConfigRoot,
   loadVisualDevConfig,
   VisualDevConfigError,
+  findEgoBrowserExecutable,
 } from "@visual-remote/bridge-core";
 
 const execFileAsync = promisify(execFile);
@@ -191,6 +192,23 @@ export async function runDoctor(
       message: rtkAvailable
         ? "rtk is available for token-efficient command output."
         : "rtk was not found; agent commands will use their native output.",
+    });
+
+    const egoExecutable = await findEgoBrowserExecutable(environment);
+    const browserPreference = loaded.config.verification.browser;
+    const effectiveBrowser =
+      browserPreference === "auto" ? (egoExecutable ? "ego" : "playwright") : browserPreference;
+    checks.push({
+      name: "verification-browser",
+      status: browserPreference === "ego" && !egoExecutable ? "fail" : "pass",
+      message:
+        browserPreference === "ego" && !egoExecutable
+          ? "verification.browser is ego but ego-browser was not found; install ego lite or use auto/playwright."
+          : effectiveBrowser === "ego"
+            ? `ego lite will verify comparisons (${egoExecutable}); it reuses your ego lite login state.`
+            : egoExecutable
+              ? "The separate Chrome profile will verify comparisons; set verification.browser to auto or ego to use ego lite."
+              : "The separate Chrome profile will verify comparisons; install ego lite to reuse your login state.",
     });
 
     const verificationCommands = loaded.config.verification.commands;

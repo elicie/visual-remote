@@ -139,9 +139,25 @@ export class PathPolicy {
     } catch {
       return false;
     }
-    if (normalized === ".git" || normalized.startsWith(".git/")) return false;
-    if (this.#denied.some((pattern) => patternMatches(pattern, normalized))) return false;
+    if (this.#isDenied(normalized)) return false;
     return this.#allowed.some((pattern) => patternMatches(pattern, normalized));
+  }
+
+  /**
+   * True when a path matches an explicit deny rule (or lives under `.git`),
+   * as opposed to merely falling outside the allowed patterns.
+   */
+  denies(path: string): boolean {
+    try {
+      return this.#isDenied(this.normalizeRelative(path));
+    } catch {
+      return true;
+    }
+  }
+
+  #isDenied(normalized: string): boolean {
+    if (normalized === ".git" || normalized.startsWith(".git/")) return true;
+    return this.#denied.some((pattern) => patternMatches(pattern, normalized));
   }
 
   assertLexicallyAllowed(path: string): string {

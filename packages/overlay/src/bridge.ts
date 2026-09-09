@@ -4,6 +4,7 @@ import type {
   ServerEvent,
   TaskRecord,
   TaskStatus,
+  VerificationBrowserKind,
 } from "@visual-remote/protocol";
 
 import {
@@ -416,7 +417,13 @@ async function authorizedFetch(
 
   const response = await fetch(path, { ...init, headers });
   if (!response.ok) {
-    const detail = compactText(await response.text(), 180);
+    const text = await response.text();
+    const failure = recordOf(recordOf(safeJsonParse(text))?.error);
+    const message = typeof failure?.message === "string" ? failure.message : "";
+    const code = typeof failure?.code === "string" ? failure.code : "";
+    const detail = message
+      ? compactText(code ? `${message} (${code})` : message, 180)
+      : compactText(text, 180);
     throw new Error(
       detail || `Bridge request failed (${response.status} ${response.statusText})`,
     );
@@ -462,6 +469,31 @@ export async function fetchViewerUrl(token: string): Promise<string> {
     throw new Error("Bridge returned an invalid viewer session URL");
   }
   return viewerUrl;
+}
+
+export interface VerificationBrowserInfo {
+  browsers: VerificationBrowserKind[];
+  defaultBrowser: VerificationBrowserKind;
+}
+
+function isBrowserKind(value: unknown): value is VerificationBrowserKind {
+  return value === "playwright" || value === "ego";
+}
+
+/** Reads which verification browsers the Bridge offers from the project payload. */
+export function verificationInfoFromProject(value: unknown): VerificationBrowserInfo | undefined {
+  const record = recordOf(value);
+  const info = recordOf(record?.verification) ?? recordOf(recordOf(record?.project)?.verification);
+  if (!info || !Array.isArray(info.browsers) || !isBrowserKind(info.defaultBrowser)) return undefined;
+  const browsers = info.browsers.filter(isBrowserKind);
+  if (!browsers.includes(info.defaultBrowser)) return undefined;
+  return { browsers, defaultBrowser: info.defaultBrowser };
+}
+
+export async function fetchVerificationInfo(token: string, options: BridgeRequestOptions = {}): Promise<VerificationBrowserInfo | undefined> {
+  return verificationInfoFromProject(await responseValue(
+    await authorizedFetch(token, "/_visual/api/project", undefined, options),
+  ));
 }
 
 export async function fetchProjectId(token: string, options: BridgeRequestOptions = {}): Promise<string | undefined> {
@@ -718,6 +750,24 @@ export async function postTaskAction(
       { method: "POST" },
     ),
   );
+}
+
+export async function commitTask(
+  token: string,
+  taskId: string,
+  message: string | undefined,
+  options: BridgeRequestOptions = {},
+): Promise<TaskRecord> {
+  const value = recordOf(await responseValue(await authorizedFetch(
+    token,
+    `/_visual/api/tasks/${encodeURIComponent(taskId)}/commit`,
+    { method: "POST", body: JSON.stringify(message === undefined ? {} : { message }) },
+    options,
+  )));
+  if (!value || typeof value.id !== "string" || !VALID_TASK_STATUSES.has(value.status as TaskStatus)) {
+    throw new Error("커밋 응답을 확인하지 못했습니다. 작업 보드를 확인하세요.");
+  }
+  return value as unknown as TaskRecord;
 }
 
 export async function approveTaskTools(

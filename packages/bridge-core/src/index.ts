@@ -1,5 +1,7 @@
 export * from "./agents/index.js";
 export * from "./bridge/index.js";
+export * from "./comparison/ego-browser.js";
+export * from "./comparison/router.js";
 export * from "./config/index.js";
 export * from "./context/resolve-sources.js";
 export * from "./context/sanitize.js";

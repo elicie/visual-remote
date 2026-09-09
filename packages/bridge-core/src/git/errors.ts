@@ -32,6 +32,19 @@ export class PathSafetyError extends RepositorySafetyError {
   }
 }
 
+export class CommitConflictError extends RepositorySafetyError {
+  readonly paths: string[];
+
+  constructor(paths: string[]) {
+    super(
+      "COMMIT_CONFLICT",
+      `Task files changed after the task completed: ${paths.join(", ")}`,
+    );
+    this.name = "CommitConflictError";
+    this.paths = paths;
+  }
+}
+
 export class RevertConflictError extends RepositorySafetyError {
   readonly paths: string[];
 

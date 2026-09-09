@@ -5,6 +5,11 @@ import { logTextStyles } from "./log-text.js";
 export const overlayStyles = String.raw`
   ${logTextStyles}
   .comparison-request { display: grid; gap: 8px; margin: 10px 0 14px; }
+  .comparison-limits { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .comparison-limits input { margin-top: 4px; }
+  .browser-choice { display: grid; gap: 6px; margin: 0; padding: 8px 9px; border: 1px solid var(--rule); border-radius: 3px; }
+  .browser-choice legend { padding: 0 4px; }
+  .browser-choice input[type="radio"] { width: 14px; height: 14px; margin: 0; accent-color: var(--dispatch); }
   .comparison-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; }
   .comparison-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--dispatch); }
   .comparison-url { width: 100%; min-width: 0; padding: 8px; color: var(--ink); background: var(--strip-strong); border: 1px solid var(--rule); border-radius: 3px; font: inherit; }
@@ -53,6 +58,7 @@ export const overlayStyles = String.raw`
 
   .visual-shell[data-open="true"] .toolbar,
   .visual-shell[data-open="true"] .strip,
+  .visual-shell[data-open="true"] .task-dock,
   .task-compact {
     pointer-events: auto;
   }
@@ -61,6 +67,7 @@ export const overlayStyles = String.raw`
     position: fixed;
     top: max(12px, env(safe-area-inset-top));
     left: 50%;
+    z-index: 5;
     display: flex;
     align-items: stretch;
     min-height: 38px;
@@ -174,6 +181,31 @@ export const overlayStyles = String.raw`
     border-radius: 4px 4px 11px 4px;
     box-shadow: 0 5px 18px rgb(0 0 0 / 28%);
     color: var(--ink);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .task-compact[data-dragging="true"] {
+    cursor: grabbing;
+    box-shadow: 0 12px 32px rgb(0 0 0 / 38%);
+  }
+
+  .task-compact-grip {
+    display: grid;
+    flex: none;
+    align-content: center;
+    gap: 3px;
+    width: 14px;
+    padding: 0 0 0 5px;
+    border-right: 1px solid var(--rule);
+    background: #e8e2d6;
+  }
+
+  .task-compact-grip span {
+    width: 5px;
+    height: 2px;
+    background: #8f8a7e;
   }
 
   .task-compact::after {
@@ -365,6 +397,37 @@ export const overlayStyles = String.raw`
     border-radius: 4px 4px 11px 4px;
     box-shadow: 0 7px 24px rgb(0 0 0 / 30%);
     color: var(--ink);
+  }
+
+  .strip-head[data-drag-handle="true"] {
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .strip[data-dragging="true"] {
+    box-shadow: 0 14px 36px rgb(0 0 0 / 40%);
+  }
+
+  .strip[data-dragging="true"] .strip-head[data-drag-handle="true"] {
+    cursor: grabbing;
+  }
+
+  .strip-grip {
+    display: grid;
+    gap: 3px;
+    width: 10px;
+    margin-right: 8px;
+  }
+
+  .strip-grip span {
+    width: 10px;
+    height: 2px;
+    background: #6f6e68;
+  }
+
+  .strip-head[data-drag-handle="true"] {
+    grid-template-columns: auto minmax(0, 1fr) auto;
   }
 
   .strip-head {
@@ -759,6 +822,31 @@ export const overlayStyles = String.raw`
     margin-left: auto;
   }
 
+  .commit-note {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    align-items: baseline;
+    margin-top: 8px;
+    padding: 7px 9px;
+    background: #e3efe9;
+    border: 1px solid #9fc4b3;
+    border-radius: 3px;
+    font-size: 12px;
+  }
+
+  .commit-note strong {
+    color: #0b5c46;
+  }
+
+  .commit-note span:last-child {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--muted);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .follow-up {
     display: grid;
     gap: 7px;
@@ -806,7 +894,212 @@ export const overlayStyles = String.raw`
     to { transform: translateX(315%); }
   }
 
+  .task-dock {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 3;
+    display: flex;
+    flex-direction: column;
+    width: min(400px, 100vw);
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    overflow: hidden;
+    background: var(--strip);
+    border-left: 1px solid #272821;
+    box-shadow: -8px 0 28px rgb(0 0 0 / 24%);
+    color: var(--ink);
+  }
+
+  .dock-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    padding: 6px 9px 6px 11px;
+    background: var(--graphite);
+    color: #f8f3e9;
+  }
+
+  .dock-close,
+  .dock-refresh {
+    min-height: 24px;
+    padding: 0 8px;
+    border: 1px solid #5b5c56;
+    border-radius: 3px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 650;
+  }
+
+  .dock-close:hover,
+  .dock-refresh:hover {
+    border-color: var(--dispatch);
+    color: var(--dispatch);
+  }
+
+  .dock-body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  .strip-docked {
+    position: static;
+    flex: none;
+    width: auto;
+    max-height: none;
+    overflow: visible;
+    border: 0;
+    border-bottom: 1px solid var(--rule);
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .strip-docked .strip-head {
+    background: var(--graphite-2);
+  }
+
+  .dock-section-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 11px;
+    background: #e8e2d6;
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+
+  .dock-section-head .dock-refresh {
+    border-color: #9a9488;
+    color: var(--ink);
+  }
+
+  .dock-empty {
+    margin: 0;
+    padding: 12px 11px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .dock-error {
+    margin: 8px 11px 0;
+  }
+
+  .dock-list {
+    flex: none;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .dock-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    min-height: 52px;
+    padding: 8px 11px;
+    border: 0;
+    border-bottom: 1px solid var(--rule);
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+  }
+
+  .dock-row:hover {
+    background: #ebe5d9;
+  }
+
+  .dock-row[aria-current="true"] {
+    background: var(--strip-strong);
+    box-shadow: inset 3px 0 0 var(--dispatch);
+  }
+
+  .dock-row:focus-visible {
+    outline: 3px solid var(--dispatch);
+    outline-offset: -3px;
+  }
+
+  .dock-state {
+    width: 9px;
+    height: 9px;
+    border: 1px solid #075e68;
+    background: var(--verified);
+  }
+
+  .dock-row[data-tone="active"] .dock-state {
+    border-color: var(--dispatch-dark);
+    background: var(--dispatch);
+  }
+
+  .dock-row[data-tone="review"] .dock-state {
+    border-color: #8a5b14;
+    background: #c8861d;
+  }
+
+  .dock-row[data-tone="issue"] .dock-state {
+    border-color: #711912;
+    background: var(--danger);
+  }
+
+  .dock-copy {
+    display: grid;
+    min-width: 0;
+    gap: 1px;
+  }
+
+  .dock-copy strong,
+  .dock-copy span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dock-copy strong {
+    font-size: 12px;
+    font-weight: 650;
+  }
+
+  .dock-copy span {
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  .dock-meta {
+    color: var(--muted);
+    font-size: 10px;
+  }
+
   @media (max-width: 600px) {
+    .task-dock {
+      top: max(58px, calc(env(safe-area-inset-top) + 50px));
+      left: 0;
+      width: auto;
+      padding-top: 0;
+      border-top: 1px solid #272821;
+      border-left: 0;
+      box-shadow: 0 -8px 28px rgb(0 0 0 / 24%);
+    }
+
     .toolbar {
       right: 8px;
       left: 8px;
@@ -827,8 +1120,7 @@ export const overlayStyles = String.raw`
     .task-compact {
       top: max(66px, calc(env(safe-area-inset-top) + 58px));
       right: 8px;
-      left: 8px;
-      width: auto;
+      width: min(360px, calc(100vw - 16px));
     }
 
     .connection {

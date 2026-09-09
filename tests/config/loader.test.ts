@@ -102,6 +102,7 @@ describe("visual dev config", () => {
         "  adapter: claude",
         "  model: sonnet",
         "  reasoningEffort: max",
+        "  permissionMode: acceptEdits",
         "  inheritEnv: [ANTHROPIC_API_KEY]",
         "",
       ].join("\n"),
@@ -112,8 +113,41 @@ describe("visual dev config", () => {
       adapter: "claude",
       model: "sonnet",
       reasoningEffort: "max",
+      permissionMode: "acceptEdits",
       inheritEnv: ["ANTHROPIC_API_KEY"],
     });
+    expect(loaded.config.verification.browser).toBe("auto");
+
+    await writeFile(
+      configPath,
+      [
+        "version: 1",
+        "project:",
+        "  id: claude-fixture",
+        "agent:",
+        "  adapter: claude",
+        "verification:",
+        "  browser: ego",
+        "",
+      ].join("\n"),
+    );
+    expect((await loadVisualDevConfig(root)).config.verification.browser).toBe("ego");
+
+    await writeFile(
+      configPath,
+      [
+        "version: 1",
+        "project:",
+        "  id: codex-fixture",
+        "agent:",
+        "  adapter: codex",
+        "  permissionMode: bypassPermissions",
+        "",
+      ].join("\n"),
+    );
+    await expect(loadVisualDevConfig(root)).rejects.toThrow(
+      "agent.permissionMode is only supported by the Claude adapter",
+    );
 
     await writeFile(
       configPath,

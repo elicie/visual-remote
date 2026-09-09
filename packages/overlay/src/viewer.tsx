@@ -26,7 +26,7 @@ import {
   type ConnectionState,
   type TaskArtifacts,
 } from "./bridge.js";
-import { compactText } from "./helpers.js";
+import { compactText, orderTasks, upsertTask } from "./helpers.js";
 import { viewerStyles } from "./viewer-styles.js";
 import { ComparisonPanel } from "./comparison-panel.js";
 import { LogText } from "./log-text.js";
@@ -171,21 +171,6 @@ function unavailableLabel(value: TaskArtifacts["unavailable"][number]): string {
   if (value === "files") return "변경 파일";
   if (value === "logs") return "작업 로그";
   return "diff";
-}
-
-function orderedTasks(tasks: TaskRecord[]): TaskRecord[] {
-  return [...tasks]
-    .sort((left, right) =>
-      right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
-    );
-}
-
-function upsertTask(tasks: TaskRecord[], nextTask: TaskRecord): TaskRecord[] {
-  const existing = tasks.findIndex((task) => task.id === nextTask.id);
-  if (existing < 0) return orderedTasks([nextTask, ...tasks]);
-  const next = [...tasks];
-  next[existing] = nextTask;
-  return orderedTasks(next);
 }
 
 function matchesQuery(task: TaskRecord, query: string): boolean {
@@ -359,6 +344,7 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
           "task.failed",
           "task.canceled",
           "task.reverted",
+          "task.committed",
           "task.verification_result",
         ].includes(event.type)
       ) {
@@ -398,7 +384,7 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
       ]);
       if (requestId !== dashboardRequestRef.current) return;
       const nextTasks = fetchedTasks.slice(0, TASK_PAGE_SIZE);
-      const ordered = orderedTasks(nextTasks);
+      const ordered = orderTasks(nextTasks);
       tasksRef.current = ordered;
       setTasks(ordered);
       setHasMore(fetchedTasks.length > TASK_PAGE_SIZE);
@@ -453,7 +439,7 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
       setTasks((current) => {
         const byId = new Map(current.map((task) => [task.id, task]));
         for (const task of page) byId.set(task.id, task);
-        const next = orderedTasks([...byId.values()]);
+        const next = orderTasks([...byId.values()]);
         tasksRef.current = next;
         return next;
       });
@@ -761,6 +747,12 @@ function Viewer({ bootstrap }: { bootstrap: BridgeBootstrap }) {
                   <div>
                     <dt>변경 파일</dt>
                     <dd class="machine">{changedFiles.length}</dd>
+                  </div>
+                  <div>
+                    <dt>커밋</dt>
+                    <dd class="machine" title={selectedTask.commit?.message}>
+                      {selectedTask.commit ? selectedTask.commit.sha.slice(0, 7) : "없음"}
+                    </dd>
                   </div>
                 </dl>
 

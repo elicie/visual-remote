@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, relative, resolve, sep } from "node:path";
 
-import { RevertConflictError, RepositorySafetyError } from "./errors.js";
+import { CommitConflictError, RevertConflictError, RepositorySafetyError } from "./errors.js";
 import { gitText, literalPathspec, runGit } from "./git-command.js";
 import { PathPolicy, type PathPolicyOptions } from "./path-policy.js";
 import { discoverGitRepository, type GitRepository } from "./repository.js";
@@ -46,6 +46,11 @@ export interface GuardVerification {
 export interface RevertResult {
   restoredFiles: string[];
   snapshot: GitSnapshot;
+}
+
+export interface CommitResult {
+  sha: string;
+  files: string[];
 }
 
 interface NameStatusEntry {
@@ -265,6 +270,39 @@ export class GitTransactionManager {
     return { text, files };
   }
 
+  /**
+   * Commits exactly the files a task changed (before → after snapshot) with the
+   * user's own Git identity. Other staged or unstaged changes are left alone;
+   * files the user edited after the task completed abort the commit.
+   */
+  async commit(beforeRef: string, afterRef: string, message: string): Promise<CommitResult> {
+    if (!message.trim()) {
+      throw new RepositorySafetyError("EMPTY_COMMIT_MESSAGE", "Commit message must not be empty");
+    }
+    await this.#assertSnapshotRef(beforeRef);
+    await this.#assertSnapshotRef(afterRef);
+    const entries = await this.#nameStatus(beforeRef, afterRef);
+    const files = [...new Set(entries.flatMap((entry) => entry.paths))];
+    for (const path of files) this.pathPolicy.assertLexicallyAllowed(path);
+    if (files.length === 0) {
+      throw new RepositorySafetyError("NOTHING_TO_COMMIT", "The task did not change any files");
+    }
+
+    const current = await this.#createWorktreeCommit("visual task commit guard\n");
+    const changedSinceAfter = await this.#changedNames(afterRef, current.commit, files);
+    if (changedSinceAfter.length > 0) throw new CommitConflictError(changedSinceAfter);
+
+    for (const group of chunks(files)) {
+      await runGit(["add", "-A", "--", ...group.map(literalPathspec)], { cwd: this.repoRoot });
+    }
+    await runGit(["commit", "--quiet", "-F", "-", "--", ...files.map(literalPathspec)], {
+      cwd: this.repoRoot,
+      input: message.endsWith("\n") ? message : `${message}\n`,
+    });
+    const sha = await gitText(["rev-parse", "--verify", "HEAD"], { cwd: this.repoRoot });
+    return { sha, files };
+  }
+
   async revert(taskId: string, beforeRef: string, afterRef: string): Promise<RevertResult> {
     await this.#assertSnapshotRef(beforeRef);
     await this.#assertSnapshotRef(afterRef);
@@ -326,17 +364,41 @@ export class GitTransactionManager {
   }
 
   async #restrictedFingerprint(): Promise<string> {
-    const restricted = [
+    const candidates = [
       ...new Set([
         ...(await this.#candidatePaths()).filter((path) => !this.pathPolicy.allows(path)),
         ...(await this.#scanRestrictedFiles()),
       ]),
     ].sort();
+    // Git-ignored files outside the allowed patterns are build artifacts
+    // (tsconfig.tsbuildinfo, coverage output, caches) that agent commands
+    // such as `tsc` rewrite as a side effect. Only explicitly denied paths
+    // (.env, keys, ...) stay guarded when Git ignores them.
+    const ignored = await this.#ignoredPaths(candidates.filter((path) => !this.pathPolicy.denies(path)));
+    const restricted = candidates.filter((path) => !ignored.has(path));
     const entries: Array<readonly [string, string]> = [];
     for (const path of restricted) {
       entries.push([path, await hashPath(this.repoRoot, path)]);
     }
     return serializeRestrictedState(entries);
+  }
+
+  async #ignoredPaths(paths: readonly string[]): Promise<Set<string>> {
+    if (paths.length === 0) return new Set();
+    // check-ignore exits with 1 when no path is ignored; tracked files are
+    // never reported as ignored without --no-index, so they stay guarded.
+    const result = await runGit(["check-ignore", "-z", "--stdin"], {
+      cwd: this.repoRoot,
+      input: `${paths.join("\0")}\0`,
+      allowFailure: true,
+    });
+    if (result.exitCode !== 0 && result.exitCode !== 1) {
+      throw new RepositorySafetyError(
+        "RESTRICTED_SCAN_FAILED",
+        `git check-ignore failed: ${result.stderr.toString("utf8").trim()}`,
+      );
+    }
+    return new Set(nulPaths(result.stdout));
   }
 
   async #scanRestrictedFiles(): Promise<string[]> {

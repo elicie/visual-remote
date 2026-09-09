@@ -25,8 +25,23 @@ export interface ClaudeAdapterOptions {
   killGraceMs?: number;
   model?: string;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max";
+  permissionMode?: ClaudePermissionMode;
   rtkExecutable?: string | false;
 }
+
+/**
+ * Claude CLI `--permission-mode` values that make sense for a headless run.
+ * `default` denies every tool that local Claude permission rules do not
+ * already allow, `acceptEdits` additionally auto-approves file edits in the
+ * workspace, and `bypassPermissions` approves every tool call including Bash.
+ */
+export type ClaudePermissionMode = "default" | "acceptEdits" | "bypassPermissions";
+
+/**
+ * A headless `claude -p` run cannot prompt, so anything short of
+ * `bypassPermissions` silently denies Bash unless local rules allow it.
+ */
+export const DEFAULT_CLAUDE_PERMISSION_MODE: ClaudePermissionMode = "bypassPermissions";
 
 const execFileAsync = promisify(execFile);
 
@@ -84,6 +99,7 @@ export class ClaudeAdapter implements AgentAdapter {
   readonly #killGraceMs: number;
   readonly #model: string | undefined;
   readonly #reasoningEffort: ClaudeAdapterOptions["reasoningEffort"];
+  readonly #permissionMode: ClaudePermissionMode;
   readonly #rtkExecutable: string | false;
   #rtkVersion: Promise<string | undefined> | undefined;
 
@@ -92,6 +108,7 @@ export class ClaudeAdapter implements AgentAdapter {
     this.#killGraceMs = options.killGraceMs ?? 2_000;
     this.#model = options.model;
     this.#reasoningEffort = options.reasoningEffort;
+    this.#permissionMode = options.permissionMode ?? DEFAULT_CLAUDE_PERMISSION_MODE;
     this.#rtkExecutable = options.rtkExecutable ?? "rtk";
   }
 
@@ -144,6 +161,7 @@ export class ClaudeAdapter implements AgentAdapter {
       ...(this.#reasoningEffort === undefined
         ? []
         : ["--effort", this.#reasoningEffort]),
+      "--permission-mode", this.#permissionMode,
     ];
   }
 

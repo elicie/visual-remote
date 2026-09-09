@@ -59,9 +59,12 @@ export interface TaskServiceOptions {
   resumeMode?: "auto" | "new";
   environment?: Record<string, string>;
   comparisonRoot?: string;
+  /** Advertised to the agent so it can inspect the app with ego lite itself. */
+  egoBrowserExecutable?: string;
   comparisonBrowser?: {
     begin(taskId: string, context: ContextBundle, signal: AbortSignal): Promise<void>;
     capture(taskId: string, context: ContextBundle, dimensions: { width: number; height: number }, signal: AbortSignal): Promise<CaptureResult>;
+    measure?(taskId: string, context: ContextBundle, signal: AbortSignal): Promise<{ width: number; height: number }>;
     finish(taskId: string): Promise<void>;
   };
   idFactory?: () => string;
@@ -103,9 +106,23 @@ function publicTask(task: StoredTask): TaskRecord {
   if (task.comparison) result.comparison = structuredClone(task.comparison);
   if (task.error) result.error = { ...task.error };
   if (task.permissionDeniedTools) result.permissionDeniedTools = [...task.permissionDeniedTools];
+  if (task.commit) result.commit = { ...task.commit };
   if (task.startedAt) result.startedAt = task.startedAt;
   if (task.completedAt) result.completedAt = task.completedAt;
   return result;
+}
+
+const MAX_COMMIT_MESSAGE_LENGTH = 4_000;
+const COMMIT_SUBJECT_LENGTH = 72;
+
+/** Subject from the request text, plus a body line that names the task. */
+export function defaultCommitMessage(task: Pick<TaskRecord, "id" | "requestText">): string {
+  const flattened = task.requestText.replace(/\s+/g, " ").trim() || "Visual Remote change";
+  const subject =
+    flattened.length > COMMIT_SUBJECT_LENGTH
+      ? `${flattened.slice(0, COMMIT_SUBJECT_LENGTH - 1).trimEnd()}…`
+      : flattened;
+  return `${subject}\n\nVisual Remote task ${task.id}\n`;
 }
 
 function errorInfo(error: unknown): { code: string; message: string } {
@@ -179,6 +196,7 @@ export class TaskService {
   readonly #listeners = new Set<TaskEventListener>();
   readonly #cancelRequested = new Set<string>();
   readonly #idleWaiters = new Set<() => void>();
+  #verifyingTaskId: string | undefined;
   readonly #writerHolds = new Map<
     string,
     { promise: Promise<void>; release: () => void }
@@ -190,6 +208,7 @@ export class TaskService {
   #closed = false;
   readonly #comparisonRoot: string | undefined;
   readonly #comparisonBrowser: TaskServiceOptions["comparisonBrowser"];
+  readonly #egoBrowserExecutable: string | undefined;
 
   constructor(options: TaskServiceOptions) {
     this.#projectId = options.projectId;
@@ -204,7 +223,7 @@ export class TaskService {
     this.#adapter = options.adapter;
     this.#store = options.store;
     this.#git = options.git;
-    this.#maxRunMs = options.maxRunMs ?? 15 * 60_000;
+    this.#maxRunMs = options.maxRunMs ?? 30 * 60_000;
     this.#maxPending = options.maxPending ?? 20;
     this.#resumeMode = options.resumeMode ?? "auto";
     if (!Number.isInteger(this.#maxPending) || this.#maxPending < 1) {
@@ -215,6 +234,7 @@ export class TaskService {
     this.#now = options.now ?? (() => new Date());
     this.#comparisonRoot = options.comparisonRoot === undefined ? undefined : resolve(options.comparisonRoot);
     this.#comparisonBrowser = options.comparisonBrowser;
+    this.#egoBrowserExecutable = options.egoBrowserExecutable;
     this.#recoverPersistedTasks();
   }
 
@@ -425,17 +445,78 @@ export class TaskService {
     return publicTask(accepted);
   }
 
-  async revert(id: string): Promise<TaskRecord> {
+  /**
+   * Synchronous writer check. Throws when another writer is active. Returns a
+   * promise only when the writer is held by this very task's post-run browser
+   * verification, so a review action on that task can wait instead of failing.
+   * Callers loop on this and must claim the writer synchronously afterwards.
+   */
+  #writerWait(id: string, action: string): Promise<void> | undefined {
     if (this.#closed) throw new TaskServiceError("SERVICE_CLOSED", "Task service is closed");
-    if (
-      this.#activeTaskId ||
-      this.#recovering ||
-      this.#recoveryQueue.length > 0
-    ) {
+    if (this.#verifyingTaskId === id && this.#activeTaskId === id) {
+      const hold = this.#writerHolds.get(id);
+      if (hold) return hold.promise;
+    }
+    if (this.#activeTaskId || this.#recovering || this.#recoveryQueue.length > 0) {
       throw new TaskServiceError(
         "WRITER_BUSY",
-        "Cannot revert while task recovery or another writer is active",
+        `Cannot ${action} while task recovery or another writer is active`,
       );
+    }
+    return undefined;
+  }
+
+
+  async commit(id: string, message?: string): Promise<TaskRecord> {
+    if (this.#closed) throw new TaskServiceError("SERVICE_CLOSED", "Task service is closed");
+    this.#requireTask(id);
+    // No await unless this task's own verification hold is pending; the final
+    // check and the writer claim below must stay in one synchronous segment.
+    for (let wait = this.#writerWait(id, "commit"); wait; wait = this.#writerWait(id, "commit")) {
+      await wait;
+    }
+    const task = this.#requireTask(id);
+    if (task.commit) return publicTask(task);
+    if (task.status === "unsafe" || task.status === "reverted" || !task.beforeRef || !task.afterRef) {
+      throw new TaskServiceError("TASK_NOT_COMMITTABLE", `Task cannot be committed: ${task.status}`);
+    }
+    if (task.status !== "review" && task.status !== "accepted") {
+      throw new TaskServiceError("TASK_NOT_COMMITTABLE", `Task cannot be committed: ${task.status}`);
+    }
+    const text = (message ?? "").trim() ? (message as string).trim() : defaultCommitMessage(task);
+    if (text.length > MAX_COMMIT_MESSAGE_LENGTH) {
+      throw new TaskServiceError("COMMIT_MESSAGE_TOO_LONG", `Commit message exceeds ${MAX_COMMIT_MESSAGE_LENGTH} characters`);
+    }
+    this.#activeTaskId = id;
+    try {
+      let result: Awaited<ReturnType<GitTransactionManager["commit"]>>;
+      try {
+        result = await this.#git.commit(task.beforeRef, task.afterRef, text);
+      } catch (error) {
+        if (error instanceof RepositorySafetyError) {
+          throw new TaskServiceError(error.code, error.message);
+        }
+        throw error;
+      }
+      const commit = { sha: result.sha, message: text, committedAt: this.#now().toISOString() };
+      const updated =
+        task.status === "accepted"
+          ? this.#store.updateTask(id, { commit })
+          : this.#transition(id, "accepted", { commit });
+      this.#emit("task.committed", { task: publicTask(updated), commit }, id);
+      return publicTask(updated);
+    } finally {
+      this.#activeTaskId = undefined;
+      if (!this.#closed) void this.#drain();
+      this.#resolveIdleIfNeeded();
+    }
+  }
+
+  async revert(id: string): Promise<TaskRecord> {
+    if (this.#closed) throw new TaskServiceError("SERVICE_CLOSED", "Task service is closed");
+    this.#requireTask(id);
+    for (let wait = this.#writerWait(id, "revert"); wait; wait = this.#writerWait(id, "revert")) {
+      await wait;
     }
     const task = this.#requireTask(id);
     if (task.status === "reverted") return publicTask(task);
@@ -654,8 +735,10 @@ export class TaskService {
         this.#activeAbort = new AbortController();
         try {
           await this.#execute(taskId, this.#activeAbort);
+          this.#verifyingTaskId = taskId;
           await this.#writerHolds.get(taskId)?.promise;
         } finally {
+          this.#verifyingTaskId = undefined;
           this.#activeTaskId = undefined;
           this.#activeAbort = undefined;
           this.#cancelRequested.delete(taskId);
@@ -711,6 +794,7 @@ export class TaskService {
         allowedPatterns: this.#git.pathPolicy.allowedPatterns,
         deniedPatterns: this.#git.pathPolicy.deniedPatterns,
         ...(parent ? { parent } : {}),
+        ...(this.#egoBrowserExecutable ? { egoBrowserExecutable: this.#egoBrowserExecutable } : {}),
       });
       this.#throwIfCanceled(taskId);
 
@@ -758,7 +842,10 @@ export class TaskService {
             preparation = false;
             await runAgent(combined);
           },
-          capture: (dimensions) => this.#comparisonBrowser!.capture(taskId, context, dimensions, controller.signal),
+          capture: (dimensions, working) => this.#comparisonBrowser!.capture(taskId, working, dimensions, controller.signal),
+          ...(this.#comparisonBrowser.measure
+            ? { measure: (working: ContextBundle) => this.#comparisonBrowser!.measure!(taskId, working, controller.signal) }
+            : {}),
           onState: (state) => this.#recordComparison(taskId, state),
         });
         controller.signal.throwIfAborted();

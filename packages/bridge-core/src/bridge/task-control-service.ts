@@ -44,6 +44,8 @@ export interface TaskControlServiceOptions {
     workspaceRoot: string;
     mode: BridgeMode;
     upstreamUrl: string;
+    /** Verification browsers this Bridge can use for Figma comparison. */
+    verification?: { browsers: Array<"playwright" | "ego">; defaultBrowser: "playwright" | "ego" };
   };
   browserSessions?: BrowserSessionManager;
   hmrWaitMs?: number;
@@ -99,6 +101,19 @@ function parseTaskRequest(payload: unknown): TaskRequest {
   };
 }
 
+function parseCommitMessage(payload: unknown): string | undefined {
+  if (payload === null || payload === undefined) return undefined;
+  const record = recordOf(payload);
+  if (!record) {
+    throw new ControlServiceError(400, "invalid_commit_request", "Expected { message?: string }");
+  }
+  const { message, taskId: _taskId, ...rest } = record;
+  if (Object.keys(rest).length > 0 || (message !== undefined && typeof message !== "string")) {
+    throw new ControlServiceError(400, "invalid_commit_request", "Expected { message?: string }");
+  }
+  return message as string | undefined;
+}
+
 function translateError(error: unknown): never {
   if (error instanceof ControlServiceError) {
     throw error;
@@ -111,6 +126,9 @@ function translateError(error: unknown): never {
           || error.code === "NOT_LATEST_TASK"
           || error.code === "TASK_NOT_ACCEPTABLE"
           || error.code === "TASK_NOT_REVERTIBLE"
+          || error.code === "TASK_NOT_COMMITTABLE"
+          || error.code === "COMMIT_CONFLICT"
+          || error.code === "NOTHING_TO_COMMIT"
           || error.code === "TASK_NOT_APPROVABLE"
           ? 409
           : 400;
@@ -540,6 +558,25 @@ export function createTaskControlService(
               });
             }
           });
+        } else if (message.type === "task.commit") {
+          const commitMessage = parseCommitMessage(payload);
+          void taskService.commit(taskId, commitMessage).catch((error: unknown) => {
+            try {
+              translateError(error);
+            } catch (translated) {
+              send(socket, {
+                type: "command.error",
+                payload: {
+                  code:
+                    translated instanceof ControlServiceError
+                      ? translated.code
+                      : "commit_failed",
+                  message:
+                    translated instanceof Error ? translated.message : "Commit failed",
+                },
+              });
+            }
+          });
         } else if (message.type === "task.follow_up") {
           const request = parseTaskRequest(message.payload);
           const created = taskService.create(request.context, {
@@ -668,6 +705,7 @@ export function createTaskControlService(
       workspaceRoot: options.project.workspaceRoot,
       mode: options.project.mode,
       upstreamUrl: options.project.upstreamUrl,
+      ...(options.project.verification ? { verification: options.project.verification } : {}),
     }),
     listTasks: (request) => taskService.list(request),
     createTask,
@@ -696,6 +734,14 @@ export function createTaskControlService(
     revertTask: async (taskId) => {
       try {
         return await taskService.revert(taskId);
+      } catch (error) {
+        translateError(error);
+      }
+    },
+    commitTask: async (taskId, payload) => {
+      const message = parseCommitMessage(payload);
+      try {
+        return await taskService.commit(taskId, message);
       } catch (error) {
         translateError(error);
       }

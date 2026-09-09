@@ -19,6 +19,8 @@ import {
   updateRegistry,
   writePrivate,
 } from "./files.js";
+import { PNG } from "pngjs";
+import { adaptContextToFrame, resamplePng, sameSize, scaleTargets, type Size } from "./fit.js";
 import { mimikyuSkill } from "./mimikyu-skill.js";
 export { getComparisonArtifact } from "./files.js";
 export interface DesignComparisonOptions {
@@ -27,10 +29,10 @@ export interface DesignComparisonOptions {
   root: string;
   signal: AbortSignal;
   runAgent: (prompt: string) => Promise<void>;
-  capture: (request: {
-    width: number;
-    height: number;
-  }) => Promise<CaptureResult>;
+  /** Captures `context` (possibly a viewport/region-adapted variant of the task context) at `request` size. */
+  capture: (request: Size, context: ContextBundle) => Promise<CaptureResult>;
+  /** Measures the selection crop for `context` without capturing, so the Bridge can fit it to the frame. */
+  measure?: (context: ContextBundle) => Promise<Size>;
   onState: (state: ComparisonState) => void;
 }
 function figmaIdentity(value: string): { fileKey: string; nodeId: string } {
@@ -103,7 +105,7 @@ export async function runDesignComparison(
       `Reference contract: {width:number,height:number,targets:[{text:string,rect:{x:number,y:number,width:number,height:number},styles:{color?:string,fontSize?:string,fontWeight?:string,fontFamily?:string,lineHeight?:string,letterSpacing?:string}}],sourceUrl:string,nodeId:string}. Dimensions and rectangles are frame-relative CSS pixels at scale 1; include ALL visible text nodes with real rendered bounds, not guessed containers. Empty targets only if no visible text. Export exact genuine PNG; no masks/resizing. Source URL: ${request.url}; normalized node: ${identity.nodeId}.\n${mimikyuSkill}`,
     );
     await options.runAgent(
-      `COMPARISON_PHASE=REFERENCE_ONLY\nCOMPARISON_ARTIFACT_DIRECTORY=${directory}\nRetrieve ${request.url} (file ${identity.fileKey}, node ${identity.nodeId}) using ONLY the user's existing configured Figma MCP. Read ${directory}/instructions.txt. This phase is read-only for the application: DO NOT implement, edit code, launch servers, install dependencies or execute the implementation request yet. The ONLY write exception outside the normal repository is the designated private artifact directory above. Write actual exported reference.png and reference.json matching instructions.txt there (0600). Include sourceUrl and nodeId provenance and every visible text node's real rendered geometry and CSS-equivalent typography/color. Never fabricate image, metadata or scores. If inaccessible/incomplete, explain the prerequisite and leave reference absent.\n${mimikyuSkill}`,
+      `COMPARISON_PHASE=REFERENCE_ONLY\nCOMPARISON_ARTIFACT_DIRECTORY=${directory}\nRetrieve ${request.url} (file ${identity.fileKey}, node ${identity.nodeId}) using ONLY the user's existing configured Figma MCP. Read ${directory}/instructions.txt. TRANSFER RULE: the PNG bytes must reach disk without passing through your own output. Prefer a Figma tool that saves the export directly to a local path (for example a download/export-images tool given the artifact directory) or a shell download of the export URL returned by the Figma images API when a token is already configured; a screenshot tool that returns the image as an attachment is acceptable only if you can save it without retyping it. NEVER transcribe base64 image data into a file or shell command, chunked or not: generating tens of kilobytes of base64 as text takes many minutes and exceeds the task time limit. If every available path would require relaying bytes through text, stop, explain which tool is missing, and leave the reference absent. This phase is read-only for the application: DO NOT implement, edit code, launch servers, install dependencies or execute the implementation request yet. The ONLY write exception outside the normal repository is the designated private artifact directory above. Write actual exported reference.png and reference.json matching instructions.txt there (0600). Include sourceUrl and nodeId provenance and every visible text node's real rendered geometry and CSS-equivalent typography/color. Never fabricate image, metadata or scores. If inaccessible/incomplete, explain the prerequisite and leave reference absent.\n${mimikyuSkill}`,
     );
     options.signal.throwIfAborted();
     const readReference = async (name: string, maxBytes?: number): Promise<Buffer> => {
@@ -163,6 +165,31 @@ export async function runDesignComparison(
         metadataHash,
       }),
     );
+    // Fit the selection to the frame before any edit: adapt the verification
+    // viewport (or region) so the target renders at the frame size; when the
+    // target cannot follow, keep going and scale captures for comparison.
+    let working = options.context;
+    let scaledCapture: Size | undefined;
+    if (options.measure && working.selection.mode !== "page") {
+      transition("preparing", "Fitting the selected target to the Figma frame size");
+      let current = await options.measure(working);
+      options.signal.throwIfAborted();
+      for (let attempt = 0; attempt < 2 && !sameSize(current, reference); attempt++) {
+        const adapted = adaptContextToFrame(working, current, reference);
+        if (!adapted) break;
+        const next = await options.measure(adapted);
+        options.signal.throwIfAborted();
+        working = adapted;
+        current = next;
+      }
+      if (!sameSize(current, reference)) {
+        scaledCapture = { width: current.width, height: current.height };
+        transition(
+          "preparing",
+          `Selected target renders at ${current.width}×${current.height}px while the Figma frame is ${reference.width}×${reference.height}px; captures are scaled to the frame size for comparison, so pixel scores are approximate`,
+        );
+      }
+    }
     transition(
       "correcting",
       "Reference validated and locked; implementing in the existing application",
@@ -186,25 +213,27 @@ export async function runDesignComparison(
       )
         throw new Error("Locked Figma reference changed; comparison stopped");
       state = { ...state, iteration };
+      let size: Size = { width: reference.width, height: reference.height };
+      if (scaledCapture && options.measure) {
+        // The target may have changed size after edits; capture whatever it is now.
+        const now = await options.measure(working);
+        options.signal.throwIfAborted();
+        size = { width: now.width, height: now.height };
+        scaledCapture = size;
+      }
       transition(
         "capturing",
-        `Capturing iteration ${iteration} at ${reference.width}×${reference.height} CSS pixels`,
+        `Capturing iteration ${iteration} at ${size.width}×${size.height} CSS pixels`,
       );
-      const capture = await options.capture({
-        width: reference.width,
-        height: reference.height,
-      });
+      const capture = await options.capture(size, working);
       options.signal.throwIfAborted();
       if (capture.error)
         throw new Error(`Browser capture unavailable: ${capture.error}`);
       if (capture.taskId !== options.taskId)
         throw new Error("Capture belongs to another task");
-      if (
-        capture.width !== reference.width ||
-        capture.height !== reference.height
-      )
+      if (capture.width !== size.width || capture.height !== size.height)
         throw new Error(
-          "Browser capture CSS dimensions differ from the reference; select the exact frame-sized viewport/region",
+          "Browser capture CSS dimensions differ from the requested size; select the exact frame-sized viewport/region",
         );
       const encoded = capture.pngBase64;
       if (
@@ -214,9 +243,15 @@ export async function runDesignComparison(
         !/^[A-Za-z0-9+/]*={0,2}$/u.test(encoded)
       )
         throw new Error("Capture did not provide a valid bounded PNG encoding");
-      const currentBytes = Buffer.from(encoded, "base64"),
+      let currentBytes: Buffer = Buffer.from(encoded, "base64"),
         current = decodePng(currentBytes),
         measured = validateTargets(capture.targets);
+      const scaled = !sameSize(current, reference);
+      if (scaled) {
+        current = resamplePng(current, reference.width, reference.height);
+        currentBytes = PNG.sync.write(current);
+        measured = scaleTargets(measured, reference.width / size.width, reference.height / size.height);
+      }
       transition(
         "comparing",
         `Computing pixel and structural evidence for iteration ${iteration}`,
@@ -252,6 +287,7 @@ export async function runDesignComparison(
         screenshotArtifactId: `${options.taskId}/${names[0]}`,
         heatmapArtifactId: `${options.taskId}/${names[1]}`,
         overlayArtifactId: `${options.taskId}/${names[2]}`,
+        ...(scaled ? { scaled: { width: size.width, height: size.height } } : {}),
       };
       await writePrivate(
         directory,
